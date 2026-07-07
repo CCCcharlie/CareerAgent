@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+output/
+data/chrome_profile/
+data/*.pdf
+data/*.docx

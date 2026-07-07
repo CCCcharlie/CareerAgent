@@ -1,0 +1,26 @@
+target:
+  url: "https://www.linkedin.com/jobs/"
+
+search:
+  keywords:
+    - "Junior Frontend Developer"
+    - "Full Stack Developer"
+    - "Software Engineer"
+    - "Web Developer"
+    - "Mobile App Developer"
+    - "AI Engineer"
+    - "Python Backend Developer"
+  max_pages: 3
+
+match:
+  min_score: 6
+
+ollama:
+  base_url: "http://localhost:11434"
+  vision_model: "minicpm-v:8b-2.6-q4_K_M"
+  text_model: "qwen3.5:9b"
+
+behavior:
+  headless: false
+  delay_min: 2
+  delay_max: 6
