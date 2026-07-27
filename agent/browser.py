@@ -82,6 +82,7 @@ class BrowserManager:
         
         # 首次运行才从源 Profile 复制
         try:
+            print(f"🔍 首次同步 Profile：{self.SOURCE_PROFILE_DIR} -> {self.PROFILE_DIR}")
             copied, failed = await asyncio.to_thread(self._copy_profile_tree)
             print(f"✅ 已同步浏览器 Profile：复制 {copied} 个文件")
             if failed:
