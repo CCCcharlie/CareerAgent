@@ -1,7 +1,5 @@
 import asyncio
 import io
-import os
-import shutil
 from typing import Optional
 
 from PIL import Image
@@ -10,7 +8,6 @@ from playwright.async_api import Browser, BrowserContext, Page, Playwright, asyn
 
 class BrowserManager:
     """浏览器管理器：负责启动浏览器、反检测注入、截图和安全关闭。"""
-    SOURCE_PROFILE_DIR = r"C:\Users\04268\AppData\Local\Google\Chrome\User Data\Profile 6"
     PROFILE_DIR = r"C:\Users\04268\Downloads\AgentWork\job-agent\data\chrome_profile"
 
     def __init__(self, headless: bool = False) -> None:
@@ -23,7 +20,6 @@ class BrowserManager:
 
     async def start(self) -> Page:
         """启动浏览器并返回页面对象。"""
-        await self._sync_profile_data()
         self.playwright = await async_playwright().start()
         launch_args = [
             "--disable-blink-features=AutomationControlled",
@@ -72,44 +68,6 @@ class BrowserManager:
         else:
             self.page = await self.context.new_page()
         return self.page
-
-    async def _sync_profile_data(self) -> None:
-        """仅在本地副本不存在时，从源 Profile 同步一次。"""
-        # 如果本地副本已经存在，跳过同步
-        if os.path.exists(self.PROFILE_DIR) and os.listdir(self.PROFILE_DIR):
-            print("✅ 使用已有浏览器 Profile 副本（跳过同步）")
-            return
-        
-        # 首次运行才从源 Profile 复制
-        try:
-            print(f"🔍 首次同步 Profile：{self.SOURCE_PROFILE_DIR} -> {self.PROFILE_DIR}")
-            copied, failed = await asyncio.to_thread(self._copy_profile_tree)
-            print(f"✅ 已同步浏览器 Profile：复制 {copied} 个文件")
-            if failed:
-                print(f"⚠️ 有 {failed} 个文件被占用未复制")
-        except Exception as exc:
-            print(f"⚠️ 同步 Profile 失败：{exc}")
-
-    def _copy_profile_tree(self) -> tuple[int, int]:
-        """复制 Profile 目录树，跳过被占用文件。"""
-        if not os.path.exists(self.SOURCE_PROFILE_DIR):
-            raise FileNotFoundError(f"源 Profile 不存在：{self.SOURCE_PROFILE_DIR}")
-        copied = 0
-        failed = 0
-        os.makedirs(self.PROFILE_DIR, exist_ok=True)
-        for root, _, files in os.walk(self.SOURCE_PROFILE_DIR):
-            rel_root = os.path.relpath(root, self.SOURCE_PROFILE_DIR)
-            dst_root = os.path.join(self.PROFILE_DIR, rel_root)
-            os.makedirs(dst_root, exist_ok=True)
-            for filename in files:
-                src_file = os.path.join(root, filename)
-                dst_file = os.path.join(dst_root, filename)
-                try:
-                    shutil.copy2(src_file, dst_file)
-                    copied += 1
-                except OSError:
-                    failed += 1
-        return copied, failed
 
     async def screenshot(self) -> bytes:
         """截取当前页面并返回 JPEG bytes（质量75）。"""
