@@ -1,4 +1,5 @@
 import json
+import re
 from typing import Any, Dict
 
 import httpx
@@ -47,6 +48,8 @@ class ResumeMatcher:
         payload = {
             "model": self.model,
             "prompt": prompt,
+            "format": "json",
+            "think": False,
             "stream": False,
             "options": {
                 "temperature": 0.1,
@@ -58,7 +61,9 @@ class ResumeMatcher:
                 resp = await client.post(f"{self.base_url}/api/generate", json=payload)
                 resp.raise_for_status()
                 data = resp.json()
-            content = data.get("response", "").strip()
+            content = str(data.get("response", "")).strip()
+            if not content:
+                content = str(data.get("thinking", "")).strip()
             return self._parse_json(content)
         except httpx.HTTPError as exc:
             print(f"❌ 评分模型请求失败：{exc}")
@@ -70,7 +75,8 @@ class ResumeMatcher:
     @staticmethod
     def _parse_json(content: str) -> Dict[str, Any]:
         """解析模型 JSON 输出。"""
-        text = content
+        text = content.strip()
+        text = re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
         if text.startswith("```"):
             lines = text.splitlines()
             if lines and lines[0].startswith("```"):
@@ -81,9 +87,70 @@ class ResumeMatcher:
             if text.lower().startswith("json"):
                 text = text[4:].strip()
         try:
-            data = json.loads(text)
-            score = float(data.get("score", 5))
-            reason = str(data.get("reason", "解析失败")).strip() or "解析失败"
-            return {"score": score, "reason": reason}
-        except Exception:
-            return {"score": 5, "reason": "解析失败"}
+            return ResumeMatcher._normalize_result(json.loads(text))
+        except json.JSONDecodeError:
+            pass
+
+        json_text = ResumeMatcher._extract_first_json_object(text)
+        if json_text:
+            try:
+                return ResumeMatcher._normalize_result(json.loads(json_text))
+            except json.JSONDecodeError:
+                pass
+
+        score_match = re.search(r'"?score"?\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)', text, flags=re.IGNORECASE)
+        reason_match = re.search(
+            r'"?reason"?\s*[:=]\s*"?(.*?)"?\s*(?:[,}\n]|$)',
+            text,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if score_match:
+            score = float(score_match.group(1))
+            reason = reason_match.group(1).strip() if reason_match else "模型输出非标准JSON，已兜底提取"
+            return ResumeMatcher._normalize_result({"score": score, "reason": reason})
+
+        print(f"⚠️ 评分结果解析失败，原始输出片段：{text[:300]}")
+        return {"score": 5, "reason": "解析失败"}
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> str:
+        """从文本中提取首个 JSON 对象字符串。"""
+        start = text.find("{")
+        if start < 0:
+            return ""
+        depth = 0
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                elif ch == "\\":
+                    escape = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    return text[start : i + 1]
+        return ""
+
+    @staticmethod
+    def _normalize_result(data: Dict[str, Any]) -> Dict[str, Any]:
+        """标准化模型评分结果，约束分数区间并清洗理由文本。"""
+        score_raw = data.get("score", 5)
+        try:
+            score = float(score_raw)
+        except (TypeError, ValueError):
+            score = 5.0
+        score = max(1.0, min(10.0, score))
+        reason = str(data.get("reason", "解析失败")).strip()
+        if not reason:
+            reason = "解析失败"
+        return {"score": score, "reason": reason}
