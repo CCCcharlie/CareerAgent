@@ -78,7 +78,7 @@ class LocalVisionAPI:
                     "num_predict": 1024,
                 },
             }
-            async with httpx.AsyncClient(timeout=120) as client:
+            async with httpx.AsyncClient(timeout=300) as client:
                 resp = await client.post(f"{self.base_url}/api/generate", json=payload)
                 resp.raise_for_status()
                 data = resp.json()

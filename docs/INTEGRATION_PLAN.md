@@ -1,6 +1,6 @@
 # INTEGRATION_PLAN
 
-> **当前进度**：Phase 1 已完成，下一步 Phase 2（请在每次 Phase 完成并 commit 后手动更新这一行，例如"Phase 1-4 已完成，下一步 Phase 5"，不需要为此单独建文件）
+> **当前进度**：Phase 1-2 已完成，下一步 Phase 3（请在每次 Phase 完成并 commit 后手动更新这一行，例如"Phase 1-4 已完成，下一步 Phase 5"，不需要为此单独建文件）
 
 ---
 
