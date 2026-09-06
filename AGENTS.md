@@ -140,6 +140,11 @@ fingerprint spoofing 或任何未经验证的 stealth 方案。这个项目的�
 
 ## 7. 环境依赖
 
+本项目要求 Python 3.11 或 3.12；Python 3.13 无法安装固定版本的
+playwright/greenlet 依赖。Agent 执行 Python 相关命令时，应使用项目
+虚拟环境解释器 `.venv\Scripts\python.exe`，不要依赖 PATH 中默认解析到的
+`python`，因为不同终端/进程的虚拟环境激活状态不共享。
+
 ```bash
 pip install -r requirements.txt
 playwright install chromium
