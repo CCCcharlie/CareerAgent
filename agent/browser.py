@@ -1,14 +1,21 @@
 import asyncio
 import io
+import os
 from typing import Optional
 
 from PIL import Image
 from playwright.async_api import Browser, BrowserContext, Page, Playwright, async_playwright
 
 
+from agent.extractor import UniversalJobDescriptionExtractor
+
+
 class BrowserManager:
     """浏览器管理器：负责启动浏览器、反检测注入、截图和安全关闭。"""
-    PROFILE_DIR = r"C:\Users\04268\Downloads\AgentWork\job-agent\data\chrome_profile"
+    PROFILE_DIR = os.getenv(
+        "CAREER_AGENT_PROFILE_DIR",
+        r"C:\Users\04268\Downloads\AgentWork\job-agent\data\chrome_profile",
+    )
 
     def __init__(self, headless: bool = False) -> None:
         """初始化浏览器管理器。"""
@@ -96,6 +103,34 @@ class BrowserManager:
             }
             """
         )
+
+    async def get_job_detail_text(self) -> str:
+        """提取当前岗位详情正文，不依赖 URL 提取成功。"""
+        if not self.page:
+            raise RuntimeError("页面未初始化，无法提取文本。")
+
+        try:
+            extractor = UniversalJobDescriptionExtractor(self.page)
+            description = await extractor.extract_description()
+            if description:
+                return description
+            return ""
+        except Exception as exc:
+            print(f"⚠️ 提取岗位详情失败：{exc}")
+            return ""
+
+    async def get_job_url(self) -> Optional[str]:
+        """提取并规范化当前岗位 URL。"""
+        if not self.page:
+            return None
+
+        try:
+            extractor = UniversalJobDescriptionExtractor(self.page)
+
+            return await extractor.extract_url()
+        except Exception as exc:
+            print(f"⚠️ URL提取失败：{exc}")
+            return None
 
     async def close(self) -> None:
         """安全关闭页面、上下文和浏览器。"""
