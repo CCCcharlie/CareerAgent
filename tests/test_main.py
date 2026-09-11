@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 
 import main
 
@@ -66,6 +67,37 @@ class FakeMatcher:
         }
 
 
+class FakeSearchPage:
+    def __init__(self):
+        self.gotos = []
+
+    async def goto(self, url, **kwargs):
+        self.gotos.append((url, kwargs))
+
+    async def query_selector(self, selector):
+        return None
+
+
+class FakeRunBrowser:
+    def __init__(self):
+        self.page = FakePage()
+        self.closed = False
+
+    async def start(self):
+        return self.page
+
+    async def close(self):
+        self.closed = True
+
+
+class FakeInputLoop:
+    def __init__(self, values):
+        self.values = iter(values)
+
+    async def run_in_executor(self, executor, function):
+        return next(self.values)
+
+
 def test_crawl_and_score_preserves_full_match_result():
     scraper = main.JobScraper.__new__(main.JobScraper)
     scraper.config = {"search": {"max_pages": 1}, "match": {"min_score": 6}}
@@ -93,3 +125,72 @@ def test_crawl_and_score_preserves_full_match_result():
             "analysis": "Python experience matches the role.",
         }
     ]
+
+
+def test_search_jobs_uses_encoded_linkedin_fallback(monkeypatch):
+    scraper = main.JobScraper.__new__(main.JobScraper)
+    scraper.config = {
+        "target": {"url": "https://www.linkedin.com/jobs"},
+        "search": {"keywords": ["machine learning", "C++"]},
+    }
+    page = FakeSearchPage()
+    waited = []
+
+    async def fake_wait_for_job_list(current_page):
+        waited.append(current_page)
+
+    scraper._wait_for_job_list = fake_wait_for_job_list
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    asyncio.run(scraper._search_jobs(page))
+
+    assert page.gotos[1][0] == (
+        "https://www.linkedin.com/jobs/search/?keywords=machine+learning+C%2B%2B"
+    )
+    assert len(waited) == 1
+
+
+def test_wait_for_job_list_failure_only_warns(capsys):
+    scraper = main.JobScraper.__new__(main.JobScraper)
+
+    class PageWithoutJobList:
+        async def wait_for_selector(self, selector, timeout):
+            raise RuntimeError("selector unavailable")
+
+    asyncio.run(scraper._wait_for_job_list(PageWithoutJobList()))
+
+    assert "未检测到明确岗位列表" in capsys.readouterr().out
+
+
+def test_run_yes_starts_next_search_and_q_closes_browser(monkeypatch):
+    scraper = main.JobScraper.__new__(main.JobScraper)
+    scraper.config = {"behavior": {}}
+    scraper.jobs = []
+    scraper.browser = FakeRunBrowser()
+    search_count = []
+
+    async def fake_search_jobs(page):
+        search_count.append(page)
+
+    async def fake_crawl_and_score(page):
+        scraper.jobs.append({"title": "temporary"})
+
+    async def fake_save():
+        return Path("output/test.json")
+
+    scraper._search_jobs = fake_search_jobs
+    scraper._crawl_and_score = fake_crawl_and_score
+    scraper._save = fake_save
+    scraper._print_top10 = lambda: None
+    input_loop = FakeInputLoop(["yes", "q"])
+    monkeypatch.setattr(main.asyncio, "get_event_loop", lambda: input_loop)
+
+    asyncio.run(scraper.run())
+
+    assert len(search_count) == 2
+    assert scraper.jobs == [{"title": "temporary"}]
+    assert scraper.browser.closed is True
+
+
+async def _noop_sleep(*args, **kwargs):
+    return None

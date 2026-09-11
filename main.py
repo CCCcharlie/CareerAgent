@@ -4,6 +4,7 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlencode
 
 import httpx
 import yaml
@@ -46,8 +47,7 @@ class JobScraper:
         self.actions: Optional[HumanActions] = None
 
     async def run(self) -> None:
-        """执行完整爬取流程。"""
-        page = None
+        """执行完整爬取流程（支持交互式多次搜索）。"""
         try:
             print("✅ 阶段1：启动浏览器")
             page = await self.browser.start()
@@ -58,17 +58,99 @@ class JobScraper:
                 max_delay=float(behavior.get("delay_max", 6)),
             )
 
-            print("🔍 阶段2：搜索岗位")
-            await self._search_jobs(page)
+            # 交互式循环：支持多次搜索
+            search_count = 0
+            while True:
+                search_count += 1
+                print(f"\n{'='*60}")
+                print(f"🔍 第 {search_count} 次搜索")
+                print(f"{'='*60}")
 
-            print("📊 阶段3：爬取并评分")
-            await self._crawl_and_score(page)
+                print("\n🔍 阶段2：搜索岗位")
+                await self._search_jobs(page)
 
-            output_file = await self._save()
-            self._print_top10()
-            print(f"📁 结果已保存：{output_file}")
+                print("\n📊 阶段3：爬取并评分")
+                await self._crawl_and_score(page)
+
+                output_file = await self._save()
+                self._print_top10()
+                print(f"\n📁 结果已保存：{output_file}")
+
+                # 询问用户是否继续
+                print(f"\n{'='*60}")
+                print("ℹ️  浏览器保持开启状态")
+                print("="*60)
+                print("\n请选择下一步操作：")
+                print("  1. 继续搜索（输入回车或 'y'）")
+                print("  2. 退出程序（输入 'q' 或 'quit'）")
+                print("  3. 查看帮助（输入 'h' 或 'help'）")
+
+                try:
+                    # 使用 asyncio 的非阻塞输入
+                    user_input = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        lambda: input("\n👉 请输入选择: ").strip().lower()
+                    )
+
+                    if user_input in ['q', 'quit', 'exit']:
+                        print("\n👋 感谢使用，再见！")
+                        break
+                    elif user_input in ['h', 'help']:
+                        self._show_help()
+                        continue
+                    else:
+                        # 默认继续搜索
+                        print("\n🔄 开始新的搜索...")
+                        # 清空当前搜索结果，准备下一轮
+                        self.jobs.clear()
+                        continue
+
+                except EOFError:
+                    # 处理管道输入或 Ctrl+D
+                    print("\n⚠️ 输入结束，退出程序")
+                    break
+                except KeyboardInterrupt:
+                    print("\n⚠️ 用户中断")
+                    break
+
+        except Exception:
+            print(f"\n❌ 程序发生未处理异常：")
+            traceback.print_exc()
         finally:
             await self.browser.close()
+
+    def _show_help(self) -> None:
+        """显示帮助信息。"""
+        help_text = """
+╔═══════════════════════════════════════════════════════════╗
+║                   📖 使用帮助                             ║
+╠═══════════════════════════════════════════════════════════╣
+║                                                           ║
+║  🎯 功能说明：                                             ║
+║  • 自动搜索 LinkedIn 岗位                                 ║
+║  • AI 智能匹配简历                                        ║
+║  • 多维度评分（技术/经验/项目/薪资/潜力）                  ║
+║  • 保存结果到 JSON 文件                                   ║
+║                                                           ║
+║  ⌨️  快捷操作：                                            ║
+║  • 直接回车  → 继续下一次搜索                             ║
+║  • y / yes   → 继续搜索                                   ║
+║  • q / quit  → 退出程序                                   ║
+║  • h / help  → 显示此帮助                                 ║
+║  • Ctrl+C    → 中断当前操作                               ║
+║                                                           ║
+║  📁 输出文件：                                             ║
+║  • 位置：output/ 目录                                     ║
+║  • 格式：jobs_YYYYMMDD_HHMMSS.json                        ║
+║  • 内容：岗位详情 + 匹配分数 + 维度分析                    ║
+║                                                           ║
+║  🔧 配置修改：                                             ║
+║  • 编辑 config.yaml 调整搜索关键词                         ║
+║  • 修改 data/ 目录下的简历文件                            ║
+║                                                           ║
+╚═══════════════════════════════════════════════════════════╝
+        """
+        print(help_text)
 
     async def _search_jobs(self, page) -> None:
         """打开目标站点并执行关键词搜索。"""
@@ -86,6 +168,10 @@ class JobScraper:
             'input[placeholder*="搜索"]',
             'input[name*="query"]',
             'input[name*="keyword"]',
+            'input[aria-label*="Search by title"]',
+            'input[aria-label*="Search jobs"]',
+            'input[placeholder*="Search by title"]',
+            'input[id*="jobs-search-box-keyword"]',
         ]
         search_input = None
         for sel in selectors:
@@ -103,10 +189,35 @@ class JobScraper:
             await page.keyboard.press("Enter")
             print(f"✅ 已自动搜索：{query}")
             await asyncio.sleep(4)
+            await self._wait_for_job_list(page)
+            return
+
+        if "linkedin.com" in target_url and query:
+            search_url = f"https://www.linkedin.com/jobs/search/?{urlencode({'keywords': query})}"
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
+            print(f"✅ 已通过搜索 URL 打开：{query}")
+            await self._wait_for_job_list(page)
             return
 
         print("⚠️ 自动搜索失败，请手动在浏览器中完成搜索。")
         await asyncio.to_thread(input, "完成后请在终端按回车继续...")
+        await self._wait_for_job_list(page)
+
+    async def _wait_for_job_list(self, page) -> None:
+        """等待岗位列表区域出现，降低过早截图导致的识别失败。"""
+        list_selectors = [
+            "li.jobs-search-results__list-item",
+            "li[data-occludable-job-id]",
+            ".jobs-search-results-list__list-item",
+            ".job-card-container",
+        ]
+        for selector in list_selectors:
+            try:
+                await page.wait_for_selector(selector, timeout=8000)
+                return
+            except Exception:
+                continue
+        print("⚠️ 未检测到明确岗位列表，后续将继续尝试视觉识别。")
 
     async def _crawl_and_score(self, page) -> None:
         """按页循环抓取岗位并进行匹配评分。"""
@@ -121,7 +232,6 @@ class JobScraper:
             vision_result = await self.vision.analyze_page(
                 screenshot_bytes, f"请分析第{page_index}页招聘结果并提取岗位列表"
             )
-
             page_type = vision_result.get("page_type")
             if page_type != "job_list":
                 print(f"⚠️ 当前页面类型为 {page_type}，停止翻页。")
@@ -139,7 +249,6 @@ class JobScraper:
                 tags = job.get("tags", [])
                 click_x = job.get("click_x")
                 click_y = job.get("click_y")
-
                 if click_x is None or click_y is None:
                     print(f"⚠️ 跳过岗位（无坐标）：{title} @ {company}")
                     continue
