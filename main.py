@@ -17,10 +17,16 @@ from agent.vision import LocalVisionAPI
 class JobScraper:
     """岗位爬取主控类：编排浏览、识别、评分与结果保存。"""
 
-    def __init__(self, config: Dict[str, Any], resume_text: str, base_dir: Path) -> None:
-        """加载配置并初始化各功能模块。"""
+    def __init__(self, config: Dict[str, Any], resume_texts: Dict[str, str], base_dir: Path) -> None:
+        """加载配置并初始化各功能模块。
+
+        Args:
+            config: 配置字典
+            resume_texts: 多份简历文本，键为简历标识，值为简历内容
+            base_dir: 项目根目录
+        """
         self.config = config
-        self.resume_text = resume_text
+        self.resume_texts = resume_texts
         self.base_dir = base_dir
         self.jobs: List[Dict[str, Any]] = []
 
@@ -33,7 +39,7 @@ class JobScraper:
             model=str(ollama.get("vision_model", "minicpm-v:8b-2.6-q4_K_M")),
         )
         self.matcher = ResumeMatcher(
-            resume_text=self.resume_text,
+            resume_texts=self.resume_texts,
             base_url=str(ollama.get("base_url", "http://localhost:11434")),
             model=str(ollama.get("text_model", "qwen3.5:9b")),
         )
@@ -142,7 +148,17 @@ class JobScraper:
                 try:
                     await self.actions.human_click(float(click_x), float(click_y))
                     await self.actions.random_delay(1, 3)
-                    detail_text = await self.browser.get_page_text()
+                    job_url = await self.browser.get_job_url()
+                    detail_text = await self.browser.get_job_detail_text()
+                    if not detail_text or len(detail_text.strip()) < 100:
+                        print(f"⚠️ 跳过岗位（无法提取有效描述）：{title} @ {company}")
+                        try:
+                            await page.keyboard.press("Escape")
+                            await asyncio.sleep(1)
+                        except Exception:
+                            pass
+                        continue
+
                     match = await self.matcher.score_job(
                         title=title,
                         description=detail_text,
@@ -151,6 +167,9 @@ class JobScraper:
                     )
                     score = float(match.get("score", 5))
                     reason = str(match.get("reason", "解析失败"))
+                    selected_resume = str(match.get("selected_resume", "unknown"))
+                    dimension_scores = match.get("dimension_scores", {})
+                    analysis = str(match.get("analysis", ""))
                     print(f"✅ 评分：{score} | 理由：{reason}")
 
                     if score >= min_score:
@@ -161,9 +180,13 @@ class JobScraper:
                                 "salary": salary,
                                 "location": location,
                                 "tags": tags if isinstance(tags, list) else [],
-                                "description": detail_text[:500],
+                                "description": detail_text,  # 保存完整描述，不再截断
+                                "url": job_url or "",  # URL 提取失败时置空，不影响评分
                                 "score": score,
                                 "reason": reason,
+                                "selected_resume": selected_resume,
+                                "dimension_scores": dimension_scores,
+                                "analysis": analysis,
                             }
                         )
                     else:
@@ -254,13 +277,16 @@ async def async_main() -> None:
     """主入口：执行环境检查并启动爬虫。"""
     base_dir = Path(__file__).resolve().parent
     config_path = base_dir / "config.yaml"
-    resume_path = base_dir / "data" / "resume.md"
+    resume_dir = base_dir / "data"
 
     if not config_path.exists():
         print("❌ 未找到 config.yaml，请先创建配置文件。")
         return
-    if not resume_path.exists():
-        print("❌ 未找到 data/resume.md，请先准备简历文件。")
+
+    # 加载多份简历（支持 .md 和 .docx 格式）
+    resume_texts = await _load_multiple_resumes(resume_dir)
+    if not resume_texts:
+        print("❌ 未在 data/ 目录下找到任何简历文件（支持 .md 或 .docx）。")
         return
 
     config = await _read_yaml_async(config_path)
@@ -269,9 +295,76 @@ async def async_main() -> None:
     if not ok:
         return
 
-    resume_text = await _read_text_async(resume_path)
-    scraper = JobScraper(config=config, resume_text=resume_text, base_dir=base_dir)
+    scraper = JobScraper(config=config, resume_texts=resume_texts, base_dir=base_dir)
     await scraper.run()
+
+
+async def _load_multiple_resumes(resume_dir: Path) -> Dict[str, str]:
+    """从 data 目录加载所有简历文件。
+
+    Returns:
+        字典，键为简历标识（如 "dev", "ba_pm"），值为简历文本
+    """
+    resume_texts = {}
+
+    # 支持的简历文件格式
+    supported_extensions = {'.md', '.txt', '.docx'}
+
+    # 需要忽略的系统文件和隐藏文件
+    ignore_files = {'desktop.ini', 'thumbs.db', '.ds_store'}
+
+    # 检查 python-docx 是否可用
+    docx_available = False
+    try:
+        import docx
+        docx_available = True
+    except ImportError:
+        print("⚠️ 未安装 python-docx，将跳过 .docx 文件")
+        print("💡 提示：如需解析 Word 简历，请运行：pip install python-docx")
+
+    for file_path in resume_dir.iterdir():
+        # 跳过系统文件和隐藏文件
+        if file_path.name.lower() in ignore_files:
+            continue
+
+        if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
+            try:
+                # 根据文件名生成标识（去掉扩展名）
+                key = file_path.stem.lower().replace(' ', '_').replace('-', '_')
+
+                if file_path.suffix.lower() == '.docx':
+                    if not docx_available:
+                        print(f"⚠️ 跳过 {file_path.name}（需要 python-docx）")
+                        continue
+                    # 解析 Word 文档
+                    text = await _read_docx_async(file_path)
+                else:
+                    # 读取文本文件
+                    text = await _read_text_async(file_path)
+
+                if text.strip():
+                    resume_texts[key] = text.strip()
+                    print(f"✅ 加载简历：[{key}] - {file_path.name}")
+
+            except Exception as exc:
+                print(f"⚠️ 加载简历失败 {file_path.name}：{exc}")
+
+    return resume_texts
+
+
+async def _read_docx_async(file_path: Path) -> str:
+    """异步读取 .docx 文件内容。"""
+    try:
+        from docx import Document
+        doc = Document(str(file_path))
+        paragraphs = [para.text for para in doc.paragraphs if para.text.strip()]
+        return '\n'.join(paragraphs)
+    except ImportError:
+        # 这个异常应该在上层已经处理了，这里作为保险
+        raise RuntimeError("python-docx 未安装")
+    except Exception as exc:
+        print(f"❌ 读取 Word 文档失败：{exc}")
+        raise
 
 
 def main() -> None:
@@ -280,9 +373,11 @@ def main() -> None:
         asyncio.run(async_main())
     except KeyboardInterrupt:
         print("\n⚠️ 用户中断，已安全退出。")
+        print("💡 提示：如果浏览器仍开启，请手动关闭窗口")
     except Exception:
         print("❌ 程序发生未处理异常：")
         traceback.print_exc()
+        print("\n💡 提示：如果浏览器仍开启，请手动关闭窗口")
 
 
 if __name__ == "__main__":
