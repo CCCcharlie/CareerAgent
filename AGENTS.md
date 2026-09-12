@@ -77,23 +77,21 @@ CareerAgent 是一个本地运行的求职岗位检索、提取与简历匹配�
   `/messaging/` 等）天然不含这个特征，因此不需要额外的黑名单。
   除非发现正向匹配漏判了某类真实场景，否则不要重写成黑名单式实现。
 
-- **候选 URL 的优先级已经是安全的，只缺一个确认测试**：候选顺序是
+- **候选 URL 的优先级和兜底行为已经有测试确认**：候选顺序是
   `page.url` → `og:url` → `canonical` → `a[href*="/jobs/view/"]`，
-  最后这个宽泛的兜底选择器已经是优先级最低的一项，只有前三者都没
-  提取到岗位 ID 时才会用到它，"可能抓到侧边栏相似岗位推荐链接"的
-  风险在设计上已经降到最低，不需要调整现有顺序，只需要一条测试
-  确认极端情况下不会返回错误的岗位 URL。
+  最后这个宽泛的兜底选择器只有前三者都未提取到岗位 ID 时才会使用；
+  当前实现对多个兜底链接返回第一个匹配项，测试记录了这一行为。因此，
+  如果页面只有侧边栏相似岗位链接，仍可能返回错误岗位 URL；除非真实
+  场景证明需要更严格的关联校验，否则保留现有顺序和行为。
 
 - **ResumeMatcher 的评分结果契约**：`score_job()` 正常返回
   `{"score": float, "reason": str, "selected_resume": str,
   "dimension_scores": dict, "analysis": str}`；解析失败时至少返回
   `{"score": float, "reason": str}`（`score` 固定在 1.0~10.0 且不
   允许是 `None` 或字符串）。`_parse_json()` 内部 `weighted_score`
-  字段存在时优先于 `score` 使用。main.py 保存岗位记录时必须完整
-  保留这五个字段，历史上出现过只保存 `score`/`reason` 两个字段、
-  其余三个被静默丢弃的 bug（原 `main.py` 第277-278行、
-  `self.jobs.append()` 的字典结构），改动 `_crawl_and_score()`
-  时留意这一点。
+  字段存在时优先于 `score` 使用。Phase 6a 已修复 main.py 曾经只
+  保存 `score`/`reason` 的问题；当前 `self.jobs` 记录完整保存这五个
+  字段，并由 `tests/test_main.py` 的 fake matcher 回归测试覆盖。
 
 - **简历文本会被静默截断到 2000 字符**：`ResumeMatcher.__init__`
   里 `self.resume_texts = {k: (v or "")[:2000] for k, v in
