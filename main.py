@@ -4,7 +4,6 @@ import traceback
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from urllib.parse import urlencode
 
 import httpx
 import yaml
@@ -164,6 +163,12 @@ class JobScraper:
         await page.goto(target_url, wait_until="domcontentloaded", timeout=90000)
         await asyncio.sleep(2)
 
+        if "linkedin.com" in target_url:
+            print("⚠️ LinkedIn 请手动在浏览器中完成搜索。")
+            await asyncio.to_thread(input, "完成后请在终端按回车继续...")
+            await self._wait_for_job_list(page)
+            return
+
         selectors = [
             'input[placeholder*="搜索"]',
             'input[name*="query"]',
@@ -189,13 +194,6 @@ class JobScraper:
             await page.keyboard.press("Enter")
             print(f"✅ 已自动搜索：{query}")
             await asyncio.sleep(4)
-            await self._wait_for_job_list(page)
-            return
-
-        if "linkedin.com" in target_url and query:
-            search_url = f"https://www.linkedin.com/jobs/search/?{urlencode({'keywords': query})}"
-            await page.goto(search_url, wait_until="domcontentloaded", timeout=90000)
-            print(f"✅ 已通过搜索 URL 打开：{query}")
             await self._wait_for_job_list(page)
             return
 
@@ -320,6 +318,7 @@ class JobScraper:
                 try:
                     await self.actions.human_click(float(next_x), float(next_y))
                     await self.actions.random_delay(4, 8)
+                    await self._wait_for_job_list(page)
                 except Exception as exc:
                     print(f"⚠️ 翻页失败，流程结束：{exc}")
                     break

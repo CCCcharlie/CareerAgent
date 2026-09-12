@@ -70,11 +70,13 @@ class FakeMatcher:
 class FakeSearchPage:
     def __init__(self):
         self.gotos = []
+        self.query_selector_calls = 0
 
     async def goto(self, url, **kwargs):
         self.gotos.append((url, kwargs))
 
     async def query_selector(self, selector):
+        self.query_selector_calls += 1
         return None
 
 
@@ -127,7 +129,7 @@ def test_crawl_and_score_preserves_full_match_result():
     ]
 
 
-def test_search_jobs_uses_encoded_linkedin_fallback(monkeypatch):
+def test_search_jobs_uses_manual_linkedin_search(monkeypatch):
     scraper = main.JobScraper.__new__(main.JobScraper)
     scraper.config = {
         "target": {"url": "https://www.linkedin.com/jobs"},
@@ -135,18 +137,23 @@ def test_search_jobs_uses_encoded_linkedin_fallback(monkeypatch):
     }
     page = FakeSearchPage()
     waited = []
+    prompts = []
 
     async def fake_wait_for_job_list(current_page):
         waited.append(current_page)
 
+    async def fake_to_thread(function, prompt):
+        prompts.append(prompt)
+
     scraper._wait_for_job_list = fake_wait_for_job_list
     monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
 
     asyncio.run(scraper._search_jobs(page))
 
-    assert page.gotos[1][0] == (
-        "https://www.linkedin.com/jobs/search/?keywords=machine+learning+C%2B%2B"
-    )
+    assert len(page.gotos) == 1
+    assert page.query_selector_calls == 0
+    assert prompts == ["完成后请在终端按回车继续..."]
     assert len(waited) == 1
 
 
@@ -160,6 +167,59 @@ def test_wait_for_job_list_failure_only_warns(capsys):
     asyncio.run(scraper._wait_for_job_list(PageWithoutJobList()))
 
     assert "未检测到明确岗位列表" in capsys.readouterr().out
+
+
+def test_crawl_waits_for_job_list_after_next_page_click():
+    class PagingActions:
+        def __init__(self):
+            self.clicks = []
+
+        async def human_click(self, x, y):
+            self.clicks.append((x, y))
+
+        async def random_delay(self, minimum, maximum):
+            assert (minimum, maximum) == (4, 8)
+
+    class PagingBrowser:
+        async def screenshot(self):
+            return b"screenshot"
+
+        async def get_page_text(self):
+            return "job list"
+
+    class PagingVision:
+        def __init__(self):
+            self.calls = 0
+
+        async def analyze_page(self, screenshot, prompt):
+            self.calls += 1
+            if self.calls == 1:
+                return {
+                    "page_type": "job_list",
+                    "jobs": [],
+                    "has_next_page": True,
+                    "next_page_x": 30,
+                    "next_page_y": 40,
+                }
+            return {"page_type": "job_list", "jobs": [], "has_next_page": False}
+
+    scraper = main.JobScraper.__new__(main.JobScraper)
+    scraper.config = {"search": {"max_pages": 2}, "match": {"min_score": 6}}
+    scraper.jobs = []
+    scraper.actions = PagingActions()
+    scraper.browser = PagingBrowser()
+    scraper.vision = PagingVision()
+    wait_calls = []
+
+    async def fake_wait_for_job_list(page):
+        wait_calls.append(page)
+
+    scraper._wait_for_job_list = fake_wait_for_job_list
+
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    assert scraper.actions.clicks == [(30.0, 40.0)]
+    assert len(wait_calls) == 1
 
 
 def test_run_yes_starts_next_search_and_q_closes_browser(monkeypatch):
