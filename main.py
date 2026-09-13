@@ -217,6 +217,42 @@ class JobScraper:
                 continue
         print("⚠️ 未检测到明确岗位列表，后续将继续尝试视觉识别。")
 
+    async def _resolve_job_click_coordinates(
+        self, page, title: str, fallback_x: float, fallback_y: float
+    ) -> tuple[float, float]:
+        """优先用岗位卡片的视口坐标点击，失败时回退视觉坐标。"""
+        if not title:
+            return fallback_x, fallback_y
+
+        list_selectors = [
+            "li.jobs-search-results__list-item",
+            "li[data-occludable-job-id]",
+            ".jobs-search-results-list__list-item",
+            ".job-card-container",
+        ]
+        for selector in list_selectors:
+            try:
+                cards = await page.query_selector_all(selector)
+            except Exception:
+                continue
+
+            for card in cards:
+                try:
+                    card_text = (await card.inner_text()).strip()
+                    if title not in card_text:
+                        continue
+                    await card.scroll_into_view_if_needed()
+                    box = await card.bounding_box()
+                    if box:
+                        return (
+                            float(box["x"] + box["width"] / 2),
+                            float(box["y"] + box["height"] / 2),
+                        )
+                except Exception:
+                    continue
+
+        return fallback_x, fallback_y
+
     async def _crawl_and_score(self, page) -> None:
         """按页循环抓取岗位并进行匹配评分。"""
         max_pages = int(self.config.get("search", {}).get("max_pages", 5))
@@ -253,7 +289,10 @@ class JobScraper:
 
                 print(f"🔍 [{idx}/{len(jobs)}] {title} @ {company}")
                 try:
-                    await self.actions.human_click(float(click_x), float(click_y))
+                    resolved_x, resolved_y = await self._resolve_job_click_coordinates(
+                        page, title, float(click_x), float(click_y)
+                    )
+                    await self.actions.human_click(resolved_x, resolved_y)
                     await self.actions.random_delay(1, 3)
                     job_url = await self.browser.get_job_url()
                     detail_text = await self.browser.get_job_detail_text()
