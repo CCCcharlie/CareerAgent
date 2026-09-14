@@ -1,5 +1,7 @@
 import asyncio
 import json
+import math
+import re
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -12,6 +14,33 @@ from agent.actions import HumanActions
 from agent.browser import BrowserManager
 from agent.matcher import ResumeMatcher
 from agent.vision import LocalVisionAPI
+
+
+JOB_LIST_SCOPE = '[componentkey="SearchResultsMainContent"]'
+JOB_CARD_SELECTOR = '[role="button"][componentkey^="job-card-component-ref-"]'
+SMOKE_COUNTERS = (
+    "VISION_JOBS", "DOM_RESOLVE_SUCCESS", "DOM_RESOLVE_FAILED",
+    "AMBIGUOUS_DOM_MATCH", "CLICKS", "CORRECT_JOB", "WRONG_JOB_CLICK",
+    "DETAIL_SUCCESS", "DETAIL_FAILED",
+)
+
+
+class AutomationBlocked(RuntimeError):
+    """Stop automation when authentication or a security challenge needs a human."""
+
+
+def _job_id(value) -> Optional[str]:
+    if not isinstance(value, (str, int)) or isinstance(value, bool):
+        return None
+    value = str(value)
+    if re.fullmatch(r"[0-9]+", value):
+        return value
+    match = re.search(r"(?:/jobs/view/|[?&]currentJobId=|^job-card-component-ref-)([0-9]+)(?=$|[/?&#])", value)
+    return match.group(1) if match else None
+
+
+def _normalize_title(value) -> str:
+    return " ".join(value.split()).casefold() if isinstance(value, str) else ""
 
 
 class JobScraper:
@@ -203,12 +232,7 @@ class JobScraper:
 
     async def _wait_for_job_list(self, page) -> None:
         """等待岗位列表区域出现，降低过早截图导致的识别失败。"""
-        list_selectors = [
-            "li.jobs-search-results__list-item",
-            "li[data-occludable-job-id]",
-            ".jobs-search-results-list__list-item",
-            ".job-card-container",
-        ]
+        list_selectors = [f"{JOB_LIST_SCOPE} {JOB_CARD_SELECTOR}"]
         for selector in list_selectors:
             try:
                 await page.wait_for_selector(selector, timeout=8000)
@@ -217,61 +241,152 @@ class JobScraper:
                 continue
         print("⚠️ 未检测到明确岗位列表，后续将继续尝试视觉识别。")
 
-    async def _resolve_job_click_coordinates(
-        self, page, title: str, fallback_x: float, fallback_y: float
-    ) -> tuple[float, float]:
-        """优先用岗位卡片的视口坐标点击，失败时回退视觉坐标。"""
-        if not title:
-            return fallback_x, fallback_y
+    def _record_click_event(self, status: str, **fields) -> None:
+        if not hasattr(self, "crawl_stats"):
+            self.crawl_stats = dict.fromkeys(SMOKE_COUNTERS, 0)
+            self.click_events = []
+        if status in self.crawl_stats:
+            self.crawl_stats[status] += 1
+        self.click_events.append({"status": status, **fields})
+        print(f"{status} {json.dumps(fields, ensure_ascii=False)}")
 
-        list_selectors = [
-            "li.jobs-search-results__list-item",
-            "li[data-occludable-job-id]",
-            ".jobs-search-results-list__list-item",
-            ".job-card-container",
-        ]
-        for selector in list_selectors:
-            try:
-                cards = await page.query_selector_all(selector)
-            except Exception:
-                continue
+    async def _resolve_job_click_coordinates(self, page, job: dict) -> dict:
+        """Resolve a unique real card; never consume Vision click coordinates.
 
+        Evidence: A.3 probe found SearchResultsMainContent and 25 unique
+        job-card-component-ref-<id> buttons. Dynamic classes are not selectors.
+        """
+        title = _normalize_title(job.get("title"))
+        identity_values = [job[k] for k in ("job_id", "url", "href", "currentJobId")
+                           if job.get(k) not in (None, "")]
+        identities = [_job_id(value) for value in identity_values]
+        if identities and (None in identities or len(set(identities)) != 1):
+            return {"status": "DOM_RESOLVE_FAILED", "reason": "invalid/conflicting identity"}
+        requested_id = identities[0] if identities else None
+        if not title and not requested_id:
+            return {"status": "DOM_RESOLVE_FAILED", "reason": "missing title/identity"}
+        try:
+            scopes = await page.query_selector_all(JOB_LIST_SCOPE)
+            if len(scopes) != 1:
+                return {"status": "DOM_RESOLVE_FAILED", "reason": "missing/nonunique list scope"}
+            cards = await scopes[0].query_selector_all(JOB_CARD_SELECTOR)
+            candidates = []
             for card in cards:
+                target_id = _job_id(await card.get_attribute("componentkey"))
+                # The first paragraph is the title. Verified cards include an
+                # accessibility duplicate; its aria-hidden span is the visual title.
+                dom_title = await card.evaluate("""el => {
+                    const p = el.querySelector('p');
+                    return p ? (p.querySelector('span[aria-hidden="true"]') || p).textContent : '';
+                }""")
+                if requested_id:
+                    matched = target_id == requested_id
+                else:
+                    matched = _normalize_title(dom_title) == title
+                if matched:
+                    candidates.append((card, target_id, dom_title.strip()))
+            if len(candidates) > 1:
+                return {"status": "AMBIGUOUS_DOM_MATCH", "matches": len(candidates)}
+            if not candidates:
+                return {"status": "DOM_RESOLVE_FAILED", "reason": "no matching card"}
+            card, target_id, dom_title = candidates[0]
+            if not await card.is_visible():
+                return {"status": "DOM_RESOLVE_FAILED", "reason": "hidden card"}
+            await card.scroll_into_view_if_needed()
+            box = await card.bounding_box()
+            if (not box or box["width"] <= 0 or box["height"] <= 0
+                    or not all(math.isfinite(box[k]) for k in ("x", "y", "width", "height"))):
+                return {"status": "DOM_RESOLVE_FAILED", "reason": "no usable box after scroll"}
+            return {"status": "DOM_RESOLVE_SUCCESS", "target_job_id": target_id,
+                    "dom_title": dom_title, "x": box["x"] + box["width"] / 2,
+                    "y": box["y"] + box["height"] / 2,
+                    "strategy": "identity" if requested_id else "scoped_title_to_identity"}
+        except Exception as exc:
+            return {"status": "DOM_RESOLVE_FAILED", "reason": str(exc)}
+
+    async def _extract_job_after_dom_click(self, page, job, access_check=None):
+        target = await self._resolve_job_click_coordinates(page, job)
+        self._record_click_event(target["status"], title=job.get("title"),
+                                 **{k: v for k, v in target.items() if k != "status"})
+        if target["status"] != "DOM_RESOLVE_SUCCESS":
+            return None
+        clicked = blocked = False
+        detail_status_recorded = False
+        try:
+            if access_check:
+                await access_check(page)
+            await self.actions.human_click(target["x"], target["y"])
+            clicked = True
+            self._record_click_event("CLICKS", title=job.get("title"),
+                                     x=target["x"], y=target["y"])
+            await self.actions.random_delay(1, 3)
+            if access_check:
+                await access_check(page)
+            resulting_url = page.url
+            # Compare actual navigation identity, never a broad list-link fallback
+            # from get_job_url(), which can simply return the first left-side card.
+            actual_id = _job_id(resulting_url)
+            if target["target_job_id"]:
+                if actual_id != target["target_job_id"]:
+                    self._record_click_event("WRONG_JOB_CLICK", title=job.get("title"),
+                        target_job_id=target["target_job_id"], actual_job_id=actual_id,
+                        resulting_url=resulting_url)
+                    return None
+                self._record_click_event("CORRECT_JOB", target_job_id=actual_id,
+                                         resulting_url=resulting_url)
+            detail_text = await self.browser.get_job_detail_text()
+            if access_check:
+                await access_check(page)
+            status = "DETAIL_SUCCESS" if detail_text and len(detail_text.strip()) >= 100 else "DETAIL_FAILED"
+            self._record_click_event(status, title=job.get("title"),
+                target_job_id=target["target_job_id"], x=target["x"], y=target["y"],
+                resulting_url=resulting_url, detail_text_length=len(detail_text or ""))
+            detail_status_recorded = True
+            if status == "DETAIL_FAILED":
+                return None
+            job_url = await self.browser.get_job_url()
+            return job_url, detail_text
+        except AutomationBlocked:
+            blocked = True
+            raise
+        except Exception as exc:
+            if not detail_status_recorded:
+                self._record_click_event("DETAIL_FAILED", title=job.get("title"), reason=str(exc))
+            return None
+        finally:
+            if clicked and not blocked:
                 try:
-                    card_text = (await card.inner_text()).strip()
-                    if title not in card_text:
-                        continue
-                    await card.scroll_into_view_if_needed()
-                    box = await card.bounding_box()
-                    if box:
-                        return (
-                            float(box["x"] + box["width"] / 2),
-                            float(box["y"] + box["height"] / 2),
-                        )
+                    await page.keyboard.press("Escape")
+                    await asyncio.sleep(1)
                 except Exception:
-                    continue
+                    pass
 
-        return fallback_x, fallback_y
-
-    async def _crawl_and_score(self, page) -> None:
+    async def _crawl_and_score(self, page, *, score_jobs=True, access_check=None) -> None:
         """按页循环抓取岗位并进行匹配评分。"""
         max_pages = int(self.config.get("search", {}).get("max_pages", 5))
         min_score = float(self.config.get("match", {}).get("min_score", 6))
         assert self.actions is not None
+        self.crawl_stats = dict.fromkeys(SMOKE_COUNTERS, 0)
+        self.click_events = []
 
         for page_index in range(1, max_pages + 1):
             print(f"📊 正在处理第 {page_index}/{max_pages} 页")
+            if access_check:
+                await access_check(page)
             screenshot_bytes = await self.browser.screenshot()
             _ = await self.browser.get_page_text()
             vision_result = await self.vision.analyze_page(
                 screenshot_bytes, f"请分析第{page_index}页招聘结果并提取岗位列表"
             )
+            if access_check:
+                await access_check(page)
             page_type = vision_result.get("page_type")
             if page_type != "job_list":
                 print(f"⚠️ 当前页面类型为 {page_type}，停止翻页。")
                 break
 
             jobs = vision_result.get("jobs", []) or []
+            self.crawl_stats["VISION_JOBS"] += len(jobs)
             if not jobs:
                 print("⚠️ 本页未识别到岗位。")
 
@@ -281,30 +396,13 @@ class JobScraper:
                 salary = str(job.get("salary", "")).strip()
                 location = str(job.get("location", "")).strip()
                 tags = job.get("tags", [])
-                click_x = job.get("click_x")
-                click_y = job.get("click_y")
-                if click_x is None or click_y is None:
-                    print(f"⚠️ 跳过岗位（无坐标）：{title} @ {company}")
+                if access_check:
+                    await access_check(page)
+                extracted = await self._extract_job_after_dom_click(page, job, access_check)
+                if extracted is None or not score_jobs:
                     continue
-
-                print(f"🔍 [{idx}/{len(jobs)}] {title} @ {company}")
+                job_url, detail_text = extracted
                 try:
-                    resolved_x, resolved_y = await self._resolve_job_click_coordinates(
-                        page, title, float(click_x), float(click_y)
-                    )
-                    await self.actions.human_click(resolved_x, resolved_y)
-                    await self.actions.random_delay(1, 3)
-                    job_url = await self.browser.get_job_url()
-                    detail_text = await self.browser.get_job_detail_text()
-                    if not detail_text or len(detail_text.strip()) < 100:
-                        print(f"⚠️ 跳过岗位（无法提取有效描述）：{title} @ {company}")
-                        try:
-                            await page.keyboard.press("Escape")
-                            await asyncio.sleep(1)
-                        except Exception:
-                            pass
-                        continue
-
                     match = await self.matcher.score_job(
                         title=title,
                         description=detail_text,
@@ -339,16 +437,6 @@ class JobScraper:
                         print(f"⚠️ 分数低于阈值({min_score})，不纳入结果。")
                 except Exception as exc:
                     print(f"❌ 处理岗位失败：{exc}")
-                finally:
-                    try:
-                        await page.keyboard.press("Escape")
-                        await asyncio.sleep(1)
-                    except Exception:
-                        try:
-                            await page.go_back(wait_until="domcontentloaded", timeout=20000)
-                        except Exception:
-                            pass
-
             has_next = bool(vision_result.get("has_next_page", False))
             next_x = vision_result.get("next_page_x")
             next_y = vision_result.get("next_page_y")
