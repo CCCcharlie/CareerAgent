@@ -242,6 +242,32 @@ class JobScraper:
                 continue
         print("⚠️ 未检测到明确岗位列表，后续将继续尝试视觉识别。")
 
+    def _job_list_mode(self) -> str:
+        extraction = self.config.get("extraction", {})
+        mode = extraction.get("job_list_mode", "vision") if isinstance(extraction, dict) else "vision"
+        if mode not in ("vision", "dom"):
+            print(f"⚠️ Unsupported job_list_mode {mode!r}; using vision.")
+            return "vision"
+        return mode
+
+    @staticmethod
+    def _target_from_dom_card(job: dict) -> Optional[dict]:
+        """Convert an extractor card into a click target without re-resolving it."""
+        title = str(job.get("title", "")).strip()
+        x, y = job.get("click_x"), job.get("click_y")
+        if (not title or isinstance(x, bool) or isinstance(y, bool)
+                or not isinstance(x, (int, float)) or not isinstance(y, (int, float))
+                or not math.isfinite(x) or not math.isfinite(y)):
+            return None
+        return {
+            "status": "DOM_RESOLVE_SUCCESS",
+            "target_job_id": _job_id(job.get("job_id")),
+            "dom_title": title,
+            "x": float(x),
+            "y": float(y),
+            "strategy": "job_list_card",
+        }
+
     def _record_click_event(self, status: str, **fields) -> None:
         if not hasattr(self, "crawl_stats"):
             self.crawl_stats = dict.fromkeys(SMOKE_COUNTERS, 0)
@@ -305,8 +331,9 @@ class JobScraper:
         except Exception as exc:
             return {"status": "DOM_RESOLVE_FAILED", "reason": str(exc)}
 
-    async def _extract_job_after_dom_click(self, page, job, access_check=None, detail_observer=None):
-        target = await self._resolve_job_click_coordinates(page, job)
+    async def _extract_job_after_dom_click(self, page, job, access_check=None, detail_observer=None,
+                                           target=None):
+        target = target or await self._resolve_job_click_coordinates(page, job)
         self._record_click_event(target["status"], title=job.get("title"),
                                  **{k: v for k, v in target.items() if k != "status"})
         if target["status"] != "DOM_RESOLVE_SUCCESS":
@@ -382,27 +409,60 @@ class JobScraper:
         assert self.actions is not None
         self.crawl_stats = dict.fromkeys(SMOKE_COUNTERS, 0)
         self.click_events = []
+        job_list_mode = self._job_list_mode()
 
         for page_index in range(1, max_pages + 1):
             print(f"📊 正在处理第 {page_index}/{max_pages} 页")
             if access_check:
                 await access_check(page)
-            screenshot_bytes = await self.browser.screenshot()
-            _ = await self.browser.get_page_text()
-            vision_result = await self.vision.analyze_page(
-                screenshot_bytes, f"请分析第{page_index}页招聘结果并提取岗位列表"
-            )
-            if access_check:
-                await access_check(page)
-            page_type = vision_result.get("page_type")
-            if page_type != "job_list":
-                print(f"⚠️ 当前页面类型为 {page_type}，停止翻页。")
-                break
 
-            jobs = vision_result.get("jobs", []) or []
-            self.crawl_stats["VISION_JOBS"] += len(jobs)
-            if not jobs:
-                print("⚠️ 本页未识别到岗位。")
+            vision_result = None
+            dom_targets = {}
+            if job_list_mode == "dom":
+                dom_jobs = await self.browser.get_job_cards()
+                if not isinstance(dom_jobs, list):
+                    dom_jobs = []
+                for job in dom_jobs:
+                    if isinstance(job, dict):
+                        target = self._target_from_dom_card(job)
+                        if target is not None:
+                            dom_targets[id(job)] = target
+                jobs = [job for job in dom_jobs if id(job) in dom_targets]
+                if not jobs:
+                    # Safe hybrid fallback: Vision supplies job semantics only;
+                    # A.3 still resolves the real DOM target before clicking.
+                    print("⚠️ DOM 未返回可用岗位，改用 Vision 语义 + DOM 定位。")
+                    screenshot_bytes = await self.browser.screenshot()
+                    _ = await self.browser.get_page_text()
+                    vision_result = await self.vision.analyze_page(
+                        screenshot_bytes, f"请分析第{page_index}页招聘结果并提取岗位列表"
+                    )
+                    if access_check:
+                        await access_check(page)
+                    page_type = vision_result.get("page_type")
+                    if page_type != "job_list":
+                        print(f"⚠️ 当前页面类型为 {page_type}，停止翻页。")
+                        break
+                    jobs = vision_result.get("jobs", []) or []
+                    self.crawl_stats["VISION_JOBS"] += len(jobs)
+                    if not jobs:
+                        print("⚠️ 本页未识别到岗位。")
+            else:
+                screenshot_bytes = await self.browser.screenshot()
+                _ = await self.browser.get_page_text()
+                vision_result = await self.vision.analyze_page(
+                    screenshot_bytes, f"请分析第{page_index}页招聘结果并提取岗位列表"
+                )
+                if access_check:
+                    await access_check(page)
+                page_type = vision_result.get("page_type")
+                if page_type != "job_list":
+                    print(f"⚠️ 当前页面类型为 {page_type}，停止翻页。")
+                    break
+                jobs = vision_result.get("jobs", []) or []
+                self.crawl_stats["VISION_JOBS"] += len(jobs)
+                if not jobs:
+                    print("⚠️ 本页未识别到岗位。")
 
             for idx, job in enumerate(jobs, start=1):
                 title = str(job.get("title", "")).strip()
@@ -412,7 +472,9 @@ class JobScraper:
                 tags = job.get("tags", [])
                 if access_check:
                     await access_check(page)
-                extracted = await self._extract_job_after_dom_click(page, job, access_check, detail_observer)
+                extracted = await self._extract_job_after_dom_click(
+                    page, job, access_check, detail_observer, target=dom_targets.get(id(job))
+                )
                 if extracted is None or not score_jobs:
                     continue
                 job_url, detail_text = extracted
@@ -451,9 +513,14 @@ class JobScraper:
                         print(f"⚠️ 分数低于阈值({min_score})，不纳入结果。")
                 except Exception as exc:
                     print(f"❌ 处理岗位失败：{exc}")
-            has_next = bool(vision_result.get("has_next_page", False))
-            next_x = vision_result.get("next_page_x")
-            next_y = vision_result.get("next_page_y")
+            if job_list_mode == "dom":
+                next_target = await self.browser.get_next_page_target()
+                has_next = next_target is not None
+                next_x, next_y = next_target if next_target else (None, None)
+            else:
+                has_next = bool(vision_result.get("has_next_page", False))
+                next_x = vision_result.get("next_page_x")
+                next_y = vision_result.get("next_page_y")
             if has_next and page_index < max_pages and next_x is not None and next_y is not None:
                 print("🔍 准备进入下一页")
                 try:

@@ -24,3 +24,6 @@ behavior:
   headless: false
   delay_min: 2
   delay_max: 6
+
+extraction:
+  job_list_mode: "vision"

@@ -8,8 +8,8 @@
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
 > SearchResultsMainContent 列表 scope、card job identity 和数字分页语义。
-> **Step 1、Step 2 已完成**：`extractor.py` 解析 DOM，`browser.py` 只作安全薄封装；
-> 下一步为 Step 3，等待单独指令。
+> **Step 1~4 已完成**：默认 Vision 路径未变，DOM 路径与安全 hybrid fallback
+> 已接入。下一步为 Step 5 的人工真实对比，不自动进入。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -414,7 +414,14 @@ get_job_detail_text()/get_job_url()的做法。
 extraction.job_list_mode开关，默认值先保持"vision"不改变现有行为。
 ```
 
-验证：`verify.py`的config解析检查。可以和Step 4合并commit。
+完成（2026-09-15）：
+
+- `config.yaml` 新增 `extraction.job_list_mode: "vision"`，默认行为不变。
+- 配置测试将该字段限制为 `"vision"` 或 `"dom"`，并确认默认值是
+  `"vision"`。当前没有修改 `main.py`，因此没有接入 DOM 路径。
+
+验证：`pytest tests/test_config.py` **2 passed**；`python -X utf8 scripts/verify.py`
+**PASS**；`git diff --check` **PASS**。可与 Step 4 合并 commit，完成本 Step 后停止。
 
 ---
 
@@ -430,7 +437,20 @@ extraction.job_list_mode接入两条路径。同时补上点击详情后的显�
 Plan文档里没有这部分，是这次排障新发现的缺口，需要新写）。
 ```
 
-验证：`pytest tests/`全量 + `verify.py`。单独commit。
+完成（2026-09-15）：
+
+- `main.py` 读取 `extraction.job_list_mode`。缺失或非法值安全地按
+  `"vision"` 处理，因此默认生产路径保持原行为。
+- `"dom"` 模式直接将 `BrowserManager.get_job_cards()` 返回的 card job ID 与
+  bounding-box 中心坐标送进既有 HumanActions、详情提取和评分流程；不重新实现
+  A.4 的详情等待。
+- DOM 无可用 card 时，才调用 Vision 取得岗位语义，并复用 A.3 resolver 在真实
+  card 上取得 DOM 坐标。该 fallback 不会使用 Vision 的 `click_x` / `click_y`。
+- DOM 模式翻页只调用 `get_next_page_target()`；点击后继续用已确认的
+  `SearchResultsMainContent` / card selector 等待列表，不采用旧四个 selector。
+
+验证：`pytest tests/` **PASS**；`python -X utf8 scripts/verify.py` **PASS**；
+`git diff --check` **PASS**。Step 3 与 Step 4 合并 commit 后停止，不进入 Step 5。
 
 ---
 

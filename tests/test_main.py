@@ -472,3 +472,175 @@ def test_detail_evidence_only_runs_after_correct_job(correct, monkeypatch):
         assert len(observations[1][1]) >= 100
     else:
         assert observations == []
+
+
+class DomBrowser(FakeBrowser):
+    def __init__(self, card_pages=(), next_targets=()):
+        self.card_pages = list(card_pages)
+        self.next_targets = list(next_targets)
+        self.card_calls = 0
+        self.next_calls = 0
+        self.detail_ids = []
+
+    async def get_job_cards(self):
+        page = self.card_pages[min(self.card_calls, len(self.card_pages) - 1)] if self.card_pages else []
+        self.card_calls += 1
+        return page
+
+    async def get_next_page_target(self):
+        target = self.next_targets[min(self.next_calls, len(self.next_targets) - 1)] if self.next_targets else None
+        self.next_calls += 1
+        return target
+
+    async def get_job_detail_text(self, expected_job_id=None):
+        self.detail_ids.append(expected_job_id)
+        return await super().get_job_detail_text(expected_job_id)
+
+
+def dom_card(job_id="123456", *, x=250, y=240):
+    return {
+        "title": "Software Engineer",
+        "company": "Example Co",
+        "salary": "$100k",
+        "location": "Remote",
+        "tags": ["Python"],
+        "job_id": job_id,
+        "click_x": x,
+        "click_y": y,
+    }
+
+
+def test_default_vision_mode_does_not_request_dom_cards(monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    class VisionOnlyBrowser(FakeBrowser):
+        async def get_job_cards(self):
+            pytest.fail("default vision mode must not request DOM cards")
+
+        async def get_next_page_target(self):
+            pytest.fail("default vision mode must not request DOM pagination")
+
+    scraper = make_scraper()
+    scraper.browser = VisionOnlyBrowser()
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    assert scraper.crawl_stats["VISION_JOBS"] == 1
+    assert scraper.actions.clicks == [(250, 240)]
+
+
+def test_dom_mode_uses_card_identity_and_coordinates_without_vision(monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    class ForbiddenVision:
+        async def analyze_page(self, *args):
+            pytest.fail("DOM cards must not invoke Vision enumeration")
+
+    scraper = make_scraper()
+    scraper.config["extraction"] = {"job_list_mode": "dom"}
+    browser = DomBrowser([[dom_card()]])
+    scraper.browser = browser
+    scraper.vision = ForbiddenVision()
+    asyncio.run(scraper._crawl_and_score(FakePage([])))
+
+    assert browser.card_calls == 1
+    assert browser.detail_ids == ["123456"]
+    assert scraper.actions.clicks == [(250.0, 240.0)]
+    assert scraper.crawl_stats["VISION_JOBS"] == 0
+    assert scraper.crawl_stats["CORRECT_JOB"] == 1
+
+
+def test_dom_mode_empty_cards_uses_vision_semantics_but_dom_click_target(monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    class RecordingVision(FakeVision):
+        def __init__(self):
+            self.calls = 0
+
+        async def analyze_page(self, *args):
+            self.calls += 1
+            return await super().analyze_page(*args)
+
+    scraper = make_scraper()
+    scraper.config["extraction"] = {"job_list_mode": "dom"}
+    scraper.browser = DomBrowser([[]])
+    scraper.vision = RecordingVision()
+    asyncio.run(scraper._crawl_and_score(FakePage([FakeCard()])))
+
+    assert scraper.vision.calls == 1
+    assert scraper.actions.clicks == [(250, 240)]
+    assert scraper.crawl_stats["VISION_JOBS"] == 1
+
+
+def test_dom_mode_uses_dom_pagination_target(monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    class DomActions:
+        def __init__(self):
+            self.clicks = []
+            self.delays = []
+
+        async def human_click(self, x, y):
+            self.clicks.append((x, y))
+
+        async def random_delay(self, minimum, maximum):
+            self.delays.append((minimum, maximum))
+
+    class ForbiddenVision:
+        async def analyze_page(self, *args):
+            pytest.fail("DOM mode has usable cards on both pages")
+
+    scraper = make_scraper()
+    scraper.config = {
+        "search": {"max_pages": 2}, "match": {"min_score": 6},
+        "extraction": {"job_list_mode": "dom"},
+    }
+    browser = DomBrowser([[dom_card()], [dom_card()]], [(30.0, 40.0), None])
+    scraper.browser = browser
+    scraper.actions = DomActions()
+    scraper.vision = ForbiddenVision()
+    waits = []
+
+    async def wait_for_list(page):
+        waits.append(page)
+
+    scraper._wait_for_job_list = wait_for_list
+    asyncio.run(scraper._crawl_and_score(FakePage([]), score_jobs=False))
+
+    assert scraper.actions.clicks == [(250.0, 240.0), (30.0, 40.0), (250.0, 240.0)]
+    assert (4, 8) in scraper.actions.delays
+    assert browser.next_calls == 2
+    assert len(waits) == 1
+
+
+def test_dom_mode_empty_cards_and_no_dom_next_ends_without_vision_coordinates(monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+
+    class SemanticVision:
+        async def analyze_page(self, *args):
+            return {
+                "page_type": "job_list",
+                "jobs": [{"title": "Software Engineer", "click_x": 10, "click_y": 20}],
+                "has_next_page": True,
+                "next_page_x": 30,
+                "next_page_y": 40,
+            }
+
+    scraper = make_scraper()
+    scraper.config["extraction"] = {"job_list_mode": "dom"}
+    scraper.browser = DomBrowser([[]], [None])
+    scraper.vision = SemanticVision()
+    asyncio.run(scraper._crawl_and_score(FakePage([])))
+
+    assert scraper.actions.clicks == []
+    assert scraper.crawl_stats["DOM_RESOLVE_FAILED"] == 1
+    assert scraper.browser.next_calls == 1
+
+
+def test_invalid_job_list_mode_safely_uses_vision_mode(monkeypatch, capsys):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+    scraper = make_scraper()
+    scraper.config["extraction"] = {"job_list_mode": "coordinates"}
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    assert scraper.crawl_stats["VISION_JOBS"] == 1
+    assert "Unsupported job_list_mode 'coordinates'; using vision." in capsys.readouterr().out
