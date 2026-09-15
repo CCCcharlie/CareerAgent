@@ -117,3 +117,77 @@ def test_optional_screenshot_timeout_records_warning(tmp_path):
     asyncio.run(real_smoke.capture_screenshot(Page(), tmp_path / "after.png", report))
     assert report["status"] == "COMPLETED"
     assert report["artifact_warnings"] == ["after.png: rendering timeout"]
+
+
+def test_e2e_runs_scoring_and_saves_output(tmp_path, monkeypatch):
+    calls = []
+
+    class Page:
+        url = "https://www.linkedin.com/jobs/search/?keywords=python"
+
+        async def goto(self, url, **kwargs):
+            calls.append(("goto", url))
+
+        async def wait_for_selector(self, selector, **kwargs):
+            pass
+
+        async def screenshot(self, **kwargs):
+            pass
+
+    class Browser:
+        async def start(self):
+            return Page()
+
+        async def close(self):
+            calls.append("close")
+
+        async def get_job_cards(self):
+            return [{"job_id": "123"}]
+
+        async def get_next_page_target(self):
+            return None
+
+    class Scraper:
+        def __init__(self, config, **kwargs):
+            assert kwargs["resume_texts"] == {"resume": "text"}
+            self.browser = Browser()
+            self.jobs = []
+
+        async def _crawl_and_score(self, page, *, score_jobs, access_check, detail_observer):
+            assert score_jobs is True
+            self.crawl_stats = dict.fromkeys(real_smoke.SMOKE_COUNTERS, 0)
+            self.crawl_stats.update(CORRECT_JOB=1, DETAIL_SUCCESS=1)
+            self.jobs = [{"score": 8.0}]
+            self.click_events = []
+            calls.append("crawl")
+
+        async def _save(self):
+            output = tmp_path / "jobs_20260915_000000.json"
+            output.write_text("[]", encoding="utf-8")
+            return output
+
+    async def config(path):
+        return {}
+
+    async def check(page):
+        pass
+
+    async def resumes(path):
+        return {"resume": "text"}
+
+    monkeypatch.setattr(real_smoke, "JobScraper", Scraper)
+    monkeypatch.setattr(real_smoke, "_read_yaml_async", config)
+    monkeypatch.setattr(real_smoke, "_load_multiple_resumes", resumes)
+    monkeypatch.setattr(real_smoke, "check_access", check)
+    result = asyncio.run(real_smoke.run_search(
+        Page.url, tmp_path, job_list_mode="dom", score_jobs=True))
+
+    assert result["status"] == "COMPLETED"
+    assert result["gate"] == {
+        "CORRECT_JOB": 1,
+        "DETAIL_SUCCESS": 1,
+        "MATCH_SUCCESS": 1,
+        "output_json_exists": True,
+    }
+    assert "crawl" in calls
+    assert calls[-1] == "close"

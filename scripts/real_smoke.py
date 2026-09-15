@@ -13,7 +13,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from main import (AutomationBlocked, HumanActions, JobScraper, JOB_LIST_SCOPE,
-                  JOB_CARD_SELECTOR, SMOKE_COUNTERS, _read_yaml_async)
+                  JOB_CARD_SELECTOR, SMOKE_COUNTERS, _load_multiple_resumes,
+                  _read_yaml_async)
 from agent.extractor import (PAGE_BUTTON_SELECTOR, PAGINATION_SELECTOR,
                              UniversalJobDescriptionExtractor)
 
@@ -97,13 +98,15 @@ async def inspect_dom_probe(page, browser):
     }
 
 
-async def run_search(url, output_dir, job_list_mode="vision"):
+async def run_search(url, output_dir, job_list_mode="vision", score_jobs=False):
     started = time.monotonic()
     config = await _read_yaml_async(ROOT / "config.yaml")
     config.setdefault("search", {})["max_pages"] = 1
     config.setdefault("extraction", {})["job_list_mode"] = job_list_mode
-    scraper = JobScraper(config=config, resume_texts={}, base_dir=ROOT)
-    report = {"search_url": url, "job_list_mode": job_list_mode, "max_pages": 1, "status": "RUNNING"}
+    resume_texts = await _load_multiple_resumes(ROOT / "data") if score_jobs else {}
+    scraper = JobScraper(config=config, resume_texts=resume_texts, base_dir=ROOT)
+    report = {"search_url": url, "job_list_mode": job_list_mode, "max_pages": 1,
+              "score_jobs": score_jobs, "status": "RUNNING"}
 
     async def detail_observer(page, phase, context, text):
         await check_access(page)
@@ -145,12 +148,10 @@ async def run_search(url, output_dir, job_list_mode="vision"):
         await check_access(page)
         report["dom_probe"] = await inspect_dom_probe(page, scraper.browser)
         await capture_screenshot(page, output_dir / "before.png", report)
-        # Exercise the same Vision/resolver/actions/extractor as production.
-        # Resume scoring is unrelated to this search-click smoke.
         await asyncio.wait_for(
-            scraper._crawl_and_score(page, score_jobs=False, access_check=check_access,
+            scraper._crawl_and_score(page, score_jobs=score_jobs, access_check=check_access,
                                      detail_observer=detail_observer),
-            timeout=180,
+            timeout=360 if score_jobs else 180,
         )
         await check_access(page)
         await capture_screenshot(page, output_dir / "after.png", report)
@@ -158,6 +159,22 @@ async def run_search(url, output_dir, job_list_mode="vision"):
             raise RuntimeError("Vision returned no jobs; search click smoke was not exercised (see run.log)")
         if job_list_mode == "dom" and not report["dom_probe"]["cards"] and not scraper.crawl_stats["VISION_JOBS"]:
             raise RuntimeError("DOM and hybrid fallback returned no jobs; search click smoke was not exercised")
+        if score_jobs:
+            output_file = await scraper._save()
+            report["output_json"] = str(output_file)
+            report["accepted_jobs"] = len(scraper.jobs)
+            report["MATCH_SUCCESS"] = len(scraper.jobs)
+            gate = {
+                "CORRECT_JOB": scraper.crawl_stats.get("CORRECT_JOB", 0),
+                "DETAIL_SUCCESS": scraper.crawl_stats.get("DETAIL_SUCCESS", 0),
+                "MATCH_SUCCESS": report["MATCH_SUCCESS"],
+                "output_json_exists": output_file.exists(),
+            }
+            report["gate"] = gate
+            failed = [name for name, value in gate.items()
+                      if (isinstance(value, int) and value < 1) or value is False]
+            if failed:
+                raise RuntimeError(f"R2 gate failed: {', '.join(failed)}")
         report["status"] = "COMPLETED"
     except AutomationBlocked as exc:
         report.update(status="BLOCKED", reason=str(exc), requires_human=True)
@@ -179,14 +196,16 @@ async def run_search(url, output_dir, job_list_mode="vision"):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--search-url", required=True, type=search_url)
-    parser.add_argument("--job-list-mode", choices=("vision", "dom"), default="vision")
+    parser.add_argument("--job-list-mode", choices=("vision", "dom"), default="dom")
+    parser.add_argument("--e2e", action="store_true",
+                        help="Run the complete MVP crawl, matcher, threshold, and save flow")
     args = parser.parse_args()
     output_dir = ROOT / "output" / f"real_smoke_{datetime.now():%Y%m%d_%H%M%S}"
     output_dir.mkdir(parents=True)
     print(f"Search smoke artifacts: {output_dir}", flush=True)
     with (output_dir / "run.log").open("w", encoding="utf-8") as log:
         with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
-            report = asyncio.run(run_search(args.search_url, output_dir, args.job_list_mode))
+            report = asyncio.run(run_search(args.search_url, output_dir, args.job_list_mode, args.e2e))
     print(report["status"], report.get("reason", ""))
     for key, count in report["stats"].items():
         print(f"{key}={count}")
