@@ -16,8 +16,12 @@ def test_rejects_non_linkedin_search_url(url):
         real_smoke.search_url(url)
 
 
-@pytest.mark.parametrize("blocked,vision_jobs", [(False, 3), (True, 0), (False, 0)])
-def test_search_smoke_is_noninteractive_one_page_and_always_closes(tmp_path, monkeypatch, blocked, vision_jobs):
+@pytest.mark.parametrize("blocked,vision_jobs,mode,dom_cards", [
+    (False, 3, "vision", 1), (True, 0, "vision", 1),
+    (False, 0, "vision", 1), (False, 0, "dom", 1),
+])
+def test_search_smoke_is_noninteractive_one_page_and_always_closes(
+        tmp_path, monkeypatch, blocked, vision_jobs, mode, dom_cards):
     calls = []
 
     class Page:
@@ -39,9 +43,16 @@ def test_search_smoke_is_noninteractive_one_page_and_always_closes(tmp_path, mon
         async def close(self):
             calls.append("close")
 
+        async def get_job_cards(self):
+            return [{"job_id": str(index)} for index in range(dom_cards)]
+
+        async def get_next_page_target(self):
+            return None
+
     class Scraper:
         def __init__(self, config, **kwargs):
             assert config["search"]["max_pages"] == 1
+            assert config["extraction"]["job_list_mode"] == mode
             self.browser = Browser()
 
         async def _crawl_and_score(self, page, *, score_jobs, access_check, detail_observer):
@@ -67,11 +78,13 @@ def test_search_smoke_is_noninteractive_one_page_and_always_closes(tmp_path, mon
     monkeypatch.setattr(real_smoke, "JobScraper", Scraper)
     monkeypatch.setattr(real_smoke, "_read_yaml_async", config)
     monkeypatch.setattr(real_smoke, "check_access", check)
-    result = asyncio.run(real_smoke.run_search(Page.url, tmp_path))
+    result = asyncio.run(real_smoke.run_search(Page.url, tmp_path, mode))
     assert calls[0] == ("goto", Page.url)
     assert calls[-1] == "close"
     assert ("crawl" in calls) is not blocked
-    assert result["status"] == ("BLOCKED" if blocked else "COMPLETED" if vision_jobs else "ERROR")
+    expected = "BLOCKED" if blocked else "COMPLETED" if vision_jobs or mode == "dom" else "ERROR"
+    assert result["status"] == expected
+    assert result.get("job_list_mode") == mode
     assert json.loads((tmp_path / "result.json").read_text(encoding="utf-8")) == result
 
 

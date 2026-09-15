@@ -8,8 +8,8 @@
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
 > SearchResultsMainContent 列表 scope、card job identity 和数字分页语义。
-> **Step 1~4 已完成**：默认 Vision 路径未变，DOM 路径与安全 hybrid fallback
-> 已接入。下一步为 Step 5 的人工真实对比，不自动进入。
+> **Step 1~5 已完成**：真实单页比较确认默认 Vision 无回归，DOM identity
+> 重取 click box 后连续正确点击并提取详情。Step 6 需单独指令，不自动进入。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -441,9 +441,9 @@ Plan文档里没有这部分，是这次排障新发现的缺口，需要新写�
 
 - `main.py` 读取 `extraction.job_list_mode`。缺失或非法值安全地按
   `"vision"` 处理，因此默认生产路径保持原行为。
-- `"dom"` 模式直接将 `BrowserManager.get_job_cards()` 返回的 card job ID 与
-  bounding-box 中心坐标送进既有 HumanActions、详情提取和评分流程；不重新实现
-  A.4 的详情等待。
+- `"dom"` 模式将 `BrowserManager.get_job_cards()` 返回的 card job ID 与字段送进
+  既有点击、详情提取和评分流程；每次点击前按该 ID 重新 scroll 并取得当前
+  bounding box，避免列表滚动使预先保存的坐标过期；不重新实现 A.4 的详情等待。
 - DOM 无可用 card 时，才调用 Vision 取得岗位语义，并复用 A.3 resolver 在真实
   card 上取得 DOM 坐标。该 fallback 不会使用 Vision 的 `click_x` / `click_y`。
 - DOM 模式翻页只调用 `get_next_page_target()`；点击后继续用已确认的
@@ -459,6 +459,36 @@ Plan文档里没有这部分，是这次排障新发现的缺口，需要新写�
 对应 `DOM_EXTRACTION_PLAN.md` 第7节第5步。这一步是人工真实体验
 验证，不涉及自动化测试，不需要给Codex发指令模板，直接把
 `job_list_mode`改成`"dom"`本地跑几轮，参照Plan第7节列的对比项。
+
+---
+
+完成（2026-09-15）：使用同一 LinkedIn search URL、Chrome profile 和单页限制，
+由 `scripts/real_smoke.py --job-list-mode` 在内存中覆写配置；`config.yaml` 的
+默认 Vision 值未改变。完整 artifact 保存在：
+
+- Vision：`output/real_smoke_20260915_132842/result.json`
+- DOM（修复后）：`output/real_smoke_20260915_134030/result.json`
+
+| 指标 | Vision | DOM（修复后） |
+|---|---:|---:|
+| 岗位枚举 | 3 Vision jobs | 历史首次 DOM 列表调用识别 23 cards；修复轮在 180s 上限内处理 13 个 |
+| skip | 1 DOM resolve failed，1 ambiguous | 0 resolve failed，0 ambiguous |
+| correct / wrong | 1 / 0 | 12 / 0 |
+| detail success / failed | 1 / 0 | 12 / 0 |
+| 分页目标 | DOM probe 命中 Page 2 中心 | DOM probe 命中 Page 2 中心 |
+| 总耗时 | 74.38s | 186.50s（在单页全量完成前到达 smoke 180s 上限） |
+
+真实发现及最小修复：DOM 初版一次性保留多个 viewport-relative box；列表滚动后这些
+坐标过期，首次运行出现 20 次 `WRONG_JOB_CLICK`。现改为仍由 DOM card 提供稳定 job ID
+和字段，但每次点击前复用 A.3 identity resolver scroll 后重新取 box。修复后的 12 个连续
+真实样本全部 URL ID 正确、详情成功，未见重复 job ID 或异常跳转。
+
+本次真实页面的 DOM card 路径可用，因此没有触发 hybrid fallback；其“Vision 语义 + A.3
+DOM target，绝不使用 Vision raw click coordinates”的行为已由回归测试覆盖。进入 Step 6
+的功能正确性条件满足；若 Step 6 要求单页全量性能基线，需另行决定是否提高 smoke 时间预算。
+
+验证：`pytest tests/` **PASS**；`python -X utf8 scripts/verify.py` **PASS**；
+`git diff --check` **PASS**。完成本 Step 后停止，不进入 Step 6。
 
 ---
 

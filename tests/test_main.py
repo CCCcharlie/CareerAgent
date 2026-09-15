@@ -528,7 +528,7 @@ def test_default_vision_mode_does_not_request_dom_cards(monkeypatch):
     assert scraper.actions.clicks == [(250, 240)]
 
 
-def test_dom_mode_uses_card_identity_and_coordinates_without_vision(monkeypatch):
+def test_dom_mode_uses_card_identity_and_fresh_dom_box_without_vision(monkeypatch):
     monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
 
     class ForbiddenVision:
@@ -540,11 +540,13 @@ def test_dom_mode_uses_card_identity_and_coordinates_without_vision(monkeypatch)
     browser = DomBrowser([[dom_card()]])
     scraper.browser = browser
     scraper.vision = ForbiddenVision()
-    asyncio.run(scraper._crawl_and_score(FakePage([])))
+    card = FakeCard()
+    asyncio.run(scraper._crawl_and_score(FakePage([card])))
 
     assert browser.card_calls == 1
     assert browser.detail_ids == ["123456"]
     assert scraper.actions.clicks == [(250.0, 240.0)]
+    assert card.calls == ["scroll", "box"]
     assert scraper.crawl_stats["VISION_JOBS"] == 0
     assert scraper.crawl_stats["CORRECT_JOB"] == 1
 
@@ -604,7 +606,7 @@ def test_dom_mode_uses_dom_pagination_target(monkeypatch):
         waits.append(page)
 
     scraper._wait_for_job_list = wait_for_list
-    asyncio.run(scraper._crawl_and_score(FakePage([]), score_jobs=False))
+    asyncio.run(scraper._crawl_and_score(FakePage([FakeCard()]), score_jobs=False))
 
     assert scraper.actions.clicks == [(250.0, 240.0), (30.0, 40.0), (250.0, 240.0)]
     assert (4, 8) in scraper.actions.delays
