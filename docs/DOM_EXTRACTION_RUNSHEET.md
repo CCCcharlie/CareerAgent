@@ -6,7 +6,9 @@
 > 3 detail success / 0 detail failed，NOT_LOADED / SELECTOR_MISS / EMPTY 均为 0。
 > 根因确认是已加载详情的正文 selector 未命中；按目标 ID 提取 AboutTheJob
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
-> A.3 resolver 和 HumanActions 未改动；A.4 单独提交后停止，不进入 Step 0。
+> A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
+> SearchResultsMainContent 列表 scope、card job identity 和数字分页语义；
+> 未修改生产代码。下一步为 Step 1，等待单独指令。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -315,24 +317,32 @@ selector match count / visible / innerText length 和最终提取长度。正文
 `tests/test_main.py`、`tests/test_real_smoke.py`、本 Runsheet。原有 `AGENTS.md`
 修改、用户草稿和历史/本次诊断证据均不暂存；没有待提交的一次性临时脚本。
 
-## Step 0：选择器侦察
+## Step 0：选择器侦察（已完成，2026-09-15）
 
-对应 `DOM_EXTRACTION_PLAN.md` 第3节。人工需要做的事：正常启动
-程序，等终端提示"请手动完成搜索"时手动搜一次、回车继续——不需要
-额外的登录操作，`data/chrome_profile`已保留登录态。
+读取 `DOM_EXTRACTION_PLAN.md` 第3节后，以现有 BrowserManager 自动打开
+已验证的 LinkedIn search URL；没有修改 `main.py` 的生产人工 fallback，
+也没有要求用户手动搜索或终端按回车。临时 scout 脚本只用于本次侦察，
+不提交；完整 JSON 和 HTML 写入 `docs/debug/`：
 
-给Codex的指令：
+- `step0_dom_scout_20260915_124032.json`（272,904 bytes）
+- `step0_dom_snapshot_20260915_124032.html`（191,194 bytes）
 
-```
-请阅读 docs/DOM_EXTRACTION_PLAN.md 第3节"阶段0：选择器侦察"，
-按其中描述的方法执行（写临时调试脚本，不提交，侦察完整卡片HTML
-结构和分页区域结构）。
+自动页面结果：`Software Engineer | Liberty | LinkedIn`，3 个
+`data-testid="lazy-column"`，25 张左侧岗位卡片，列表分页可见。没有登录、
+CAPTCHA、MFA 或安全挑战。
 
-补充要求（Plan写的时候还不知道的新情况）：这次侦察时顺手确认
-Step A.3诊断中提到的两件事：卡片是否带job id类属性、列表区和
-详情区在DOM语义（role/标签）上如何区分。结果一律写入文件（比如
-docs/debug/dom_snapshot.html），不要打印到终端。
-```
+| 侦察项 | 现场确认结果 | 后续可用性 |
+|---|---|---|
+| 左侧列表 scope | `[componentkey="SearchResultsMainContent"]`，同时有 `data-testid="lazy-column"`、`data-component-type="LazyColumn"` | 可作为列表唯一 scope；不要用动态 class |
+| 岗位卡片 | scope 内 `[role="button"][componentkey^="job-card-component-ref-"]` | 25 个匹配；可作为 card selector |
+| 稳定 identity | card `componentkey="job-card-component-ref-<digits>"`，例如 `job-card-component-ref-4460945256` | 从固定前缀后的数字取得 job ID；未见 `data-job-id` 或 `data-occludable-job-id` |
+| 列表与右侧详情区分 | 右侧也有 LazyColumn，但没有 `componentkey="SearchResultsMainContent"`，且该 scope 外没有匹配的 card selector | 用列表 scope 隔离，不依赖像素位置；本页没有可靠 list/listitem role 语义 |
+| card 字段 | 可见 `p` 顺序是 title、company、location，之后是可选社交/状态/发布时间；薪资仅在部分卡片文本出现 | class 都是动态；没有确认稳定的独立 title/company/location/salary selector，Step 1 应在已确认 card scope 内解析文本/结构，不能猜 class |
+| 分页容器 | `ul[data-testid="pagination-controls-list"]`，位于列表 scope 内 | 可作为分页范围 |
+| 分页目标 | 数字按钮为 `button[data-testid^="pagination-indicator-"]`，当前页有 `aria-current="true"`、例如 `aria-label="Page 1"`；其余为 `aria-current="false"`、`Page 2` / `Page 3` | 本页没有独立 Next 按钮。下一页需从该范围选择当前页后的数字按钮，不要假设 `button[aria-label*="Next"]` |
+
+旧四个已证伪 selector 没有被采用。该结果只是 Step 1 的现场输入，不实现
+`extract_job_cards` 或分页逻辑；完成本 Step 后停止。
 
 ---
 
