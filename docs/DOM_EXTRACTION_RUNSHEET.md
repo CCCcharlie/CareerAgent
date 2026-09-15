@@ -7,7 +7,8 @@
 > 根因确认是已加载详情的正文 selector 未命中；按目标 ID 提取 AboutTheJob
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动；A.4 单独提交后停止，不进入 Step 0。
-> 本标准路径文档基于现有 DOM_EXTRACTION_RUNSHEET (2).md 整理，原文件保留。
+> `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
+> 此标准文件名。
 
 ---
 
