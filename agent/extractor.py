@@ -10,6 +10,18 @@ LINKEDIN_DETAIL_BODY = (
     '[data-testid="expandable-text-box"]'
 )
 
+# Step 0 reconnaissance confirmed these component semantics on the real search
+# page. They deliberately avoid LinkedIn's generated CSS class names.
+JOB_LIST_SCOPE = '[componentkey="SearchResultsMainContent"]'
+JOB_CARD_SELECTOR = '[role="button"][componentkey^="job-card-component-ref-"]'
+JOB_CARD_ID_PATTERN = re.compile(r"^job-card-component-ref-(\d+)$")
+PAGINATION_SELECTOR = 'ul[data-testid="pagination-controls-list"]'
+PAGE_BUTTON_SELECTOR = 'button[data-testid^="pagination-indicator-"]'
+SALARY_LINE_PATTERN = re.compile(
+    r"[$€£¥]|\b(?:AUD|USD|CNY|EUR|GBP)\b|/(?:year|yr|month|day|hour)\b",
+    re.IGNORECASE,
+)
+
 # Read identity and text together, so an old detail panel cannot satisfy readiness.
 DETAIL_STATE_SCRIPT = r"""({jobId, selector}) => {
     const visible = e => !!(e && e.getClientRects().length &&
@@ -49,6 +61,130 @@ class UniversalJobDescriptionExtractor:
     def __init__(self, page: Page) -> None:
         self.page = page
         self.detail_diagnostic = {}
+
+    async def extract_job_cards(self) -> list[dict]:
+        """Extract visible job cards from the confirmed search-results scope."""
+        scope = await self._get_job_list_scope()
+        if scope is None:
+            return []
+
+        try:
+            elements = await scope.query_selector_all(JOB_CARD_SELECTOR)
+        except Exception:
+            return []
+
+        cards = []
+        for element in elements:
+            try:
+                box = await element.bounding_box()
+                if not box or box["width"] <= 0 or box["height"] <= 0:
+                    continue
+
+                fields = [
+                    self._normalize_inline_text(await field.inner_text())
+                    for field in await element.query_selector_all("p")
+                ]
+                # The observed card structure has title first. Without it, this
+                # is not a usable job record for later orchestration.
+                if not fields or not fields[0]:
+                    continue
+
+                componentkey = await element.get_attribute("componentkey")
+                job_id_match = JOB_CARD_ID_PATTERN.fullmatch(componentkey or "")
+                card_text = await element.inner_text()
+                cards.append({
+                    "title": fields[0],
+                    "company": fields[1] if len(fields) > 1 else "",
+                    "location": fields[2] if len(fields) > 2 else "",
+                    "salary": self._extract_salary_line(card_text),
+                    "job_id": job_id_match.group(1) if job_id_match else None,
+                    "click_x": box["x"] + box["width"] / 2,
+                    "click_y": box["y"] + box["height"] / 2,
+                })
+            except Exception:
+                continue
+        return cards
+
+    async def extract_next_page_target(self) -> Optional[tuple[float, float]]:
+        """Return the center of the numeric page after the current page, if any."""
+        scope = await self._get_job_list_scope()
+        if scope is None:
+            return None
+
+        try:
+            pagination = await scope.query_selector(PAGINATION_SELECTOR)
+            if pagination is None:
+                return None
+            buttons = await pagination.query_selector_all(PAGE_BUTTON_SELECTOR)
+        except Exception:
+            return None
+
+        current_page = None
+        candidates = []
+        for button in buttons:
+            try:
+                page_number = self._page_number(await button.get_attribute("aria-label"))
+                if page_number is None:
+                    continue
+                if (await button.get_attribute("aria-current")) == "true":
+                    current_page = page_number
+                    continue
+                if await self._is_disabled(button):
+                    continue
+                candidates.append((page_number, button))
+            except Exception:
+                continue
+
+        if current_page is None:
+            return None
+        following = [(number, button) for number, button in candidates if number > current_page]
+        if not following:
+            return None
+
+        _, target = min(following, key=lambda candidate: candidate[0])
+        try:
+            await target.scroll_into_view_if_needed()
+            # Scroll can move the target, so obtain its box only afterwards.
+            box = await target.bounding_box()
+            if not box or box["width"] <= 0 or box["height"] <= 0:
+                return None
+            return (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        except Exception:
+            return None
+
+    async def _get_job_list_scope(self):
+        if not self.page:
+            return None
+        try:
+            scopes = await self.page.query_selector_all(JOB_LIST_SCOPE)
+        except Exception:
+            return None
+        # A unique component scope prevents accidentally parsing a detail panel.
+        return scopes[0] if len(scopes) == 1 else None
+
+    @staticmethod
+    async def _is_disabled(button) -> bool:
+        return (
+            await button.get_attribute("disabled") is not None
+            or (await button.get_attribute("aria-disabled")) == "true"
+        )
+
+    @staticmethod
+    def _page_number(label: Optional[str]) -> Optional[int]:
+        match = re.fullmatch(r"\s*Page\s+(\d+)\s*", label or "", re.IGNORECASE)
+        return int(match.group(1)) if match else None
+
+    @staticmethod
+    def _normalize_inline_text(text: str) -> str:
+        return " ".join(text.split())
+
+    @staticmethod
+    def _extract_salary_line(text: str) -> str:
+        for line in text.splitlines():
+            normalized = UniversalJobDescriptionExtractor._normalize_inline_text(line)
+            if normalized and SALARY_LINE_PATTERN.search(normalized):
+                return normalized
+        return ""
 
     async def _wait_for_job_detail(self, job_id: str, timeout_ms: int) -> Optional[str]:
         """Wait for the target AboutTheJob body, not just URL navigation or sleep."""

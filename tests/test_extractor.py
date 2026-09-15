@@ -2,7 +2,14 @@ import asyncio
 
 import pytest
 
-from agent.extractor import LINKEDIN_DETAIL_BODY, UniversalJobDescriptionExtractor
+from agent.extractor import (
+    JOB_CARD_SELECTOR,
+    JOB_LIST_SCOPE,
+    PAGE_BUTTON_SELECTOR,
+    PAGINATION_SELECTOR,
+    LINKEDIN_DETAIL_BODY,
+    UniversalJobDescriptionExtractor,
+)
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 
@@ -222,3 +229,173 @@ def test_extraction_stays_pending_until_target_body_is_ready():
         assert await task == text
 
     asyncio.run(scenario())
+
+
+class CardTextElement:
+    def __init__(self, text):
+        self.text = text
+
+    async def inner_text(self):
+        return self.text
+
+
+class JobCardElement:
+    def __init__(self, paragraphs, *, componentkey=None, text=None, box=None):
+        self.paragraphs = [CardTextElement(value) for value in paragraphs]
+        self.componentkey = componentkey
+        self.text = text if text is not None else "\n".join(paragraphs)
+        self.box = box
+
+    async def query_selector_all(self, selector):
+        assert selector == "p"
+        return self.paragraphs
+
+    async def get_attribute(self, name):
+        return self.componentkey if name == "componentkey" else None
+
+    async def inner_text(self):
+        return self.text
+
+    async def bounding_box(self):
+        return self.box
+
+
+class PageButton:
+    def __init__(self, page_number, *, current=False, disabled=False, box=None):
+        self.page_number = page_number
+        self.current = current
+        self.disabled = disabled
+        self.box = box or {"x": 0, "y": 0, "width": 20, "height": 10}
+        self.scrolled = False
+
+    async def get_attribute(self, name):
+        values = {
+            "aria-label": f"Page {self.page_number}",
+            "aria-current": "true" if self.current else "false",
+            "disabled": "" if self.disabled else None,
+            "aria-disabled": "true" if self.disabled else "false",
+        }
+        return values.get(name)
+
+    async def scroll_into_view_if_needed(self):
+        self.scrolled = True
+
+    async def bounding_box(self):
+        return self.box if self.scrolled else None
+
+
+class PaginationElement:
+    def __init__(self, buttons):
+        self.buttons = buttons
+
+    async def query_selector_all(self, selector):
+        assert selector == PAGE_BUTTON_SELECTOR
+        return self.buttons
+
+
+class JobListScope:
+    def __init__(self, cards=(), pagination=None):
+        self.cards = list(cards)
+        self.pagination = pagination
+
+    async def query_selector_all(self, selector):
+        assert selector == JOB_CARD_SELECTOR
+        return self.cards
+
+    async def query_selector(self, selector):
+        assert selector == PAGINATION_SELECTOR
+        return self.pagination
+
+
+class JobListPage:
+    def __init__(self, scopes):
+        self.scopes = scopes
+
+    async def query_selector_all(self, selector):
+        assert selector == JOB_LIST_SCOPE
+        return self.scopes
+
+
+def extract_cards(page):
+    return asyncio.run(UniversalJobDescriptionExtractor(page).extract_job_cards())
+
+
+def next_page_target(page):
+    return asyncio.run(UniversalJobDescriptionExtractor(page).extract_next_page_target())
+
+
+def test_extract_job_cards_uses_confirmed_scope_identity_and_dom_order():
+    cards = extract_cards(JobListPage([JobListScope([
+        JobCardElement(
+            [" Platform Engineer ", " Example Corp ", " Sydney, NSW "],
+            componentkey="job-card-component-ref-4460945256",
+            text="Platform Engineer\nExample Corp\nSydney, NSW\n6,000 CNY/month - 10K CNY/month",
+            box={"x": 10, "y": 20, "width": 100, "height": 40},
+        ),
+        JobCardElement(
+            ["Data Engineer", "Second Corp", "Melbourne, VIC"],
+            componentkey="job-card-component-ref-4460945257",
+            box={"x": 10, "y": 80, "width": 100, "height": 40},
+        ),
+    ])]))
+
+    assert cards == [
+        {
+            "title": "Platform Engineer", "company": "Example Corp", "location": "Sydney, NSW",
+            "salary": "6,000 CNY/month - 10K CNY/month", "job_id": "4460945256",
+            "click_x": 60, "click_y": 40,
+        },
+        {
+            "title": "Data Engineer", "company": "Second Corp", "location": "Melbourne, VIC",
+            "salary": "", "job_id": "4460945257", "click_x": 60, "click_y": 100,
+        },
+    ]
+
+
+def test_extract_job_cards_skips_missing_title_and_keeps_optional_fields_safe():
+    cards = extract_cards(JobListPage([JobListScope([
+        JobCardElement(["", "Not a title"], componentkey="job-card-component-ref-1", box={"x": 0, "y": 0, "width": 1, "height": 1}),
+        JobCardElement(["Title only"], box={"x": 3, "y": 5, "width": 10, "height": 20}),
+    ])]))
+
+    assert cards == [{
+        "title": "Title only", "company": "", "location": "", "salary": "", "job_id": None,
+        "click_x": 8, "click_y": 15,
+    }]
+
+
+def test_extract_job_cards_skips_hidden_cards_without_a_bounding_box():
+    page = JobListPage([JobListScope([
+        JobCardElement(["Hidden"], componentkey="job-card-component-ref-1", box=None),
+    ])])
+    assert extract_cards(page) == []
+
+
+def test_extract_job_cards_requires_one_confirmed_list_scope():
+    card = JobCardElement(["Title"], box={"x": 0, "y": 0, "width": 1, "height": 1})
+    assert extract_cards(JobListPage([])) == []
+    assert extract_cards(JobListPage([JobListScope([card]), JobListScope([card])])) == []
+
+
+def test_extract_next_page_target_uses_next_numeric_button_and_fresh_box_after_scroll():
+    current = PageButton(1, current=True)
+    target = PageButton(2, box={"x": 120, "y": 200, "width": 30, "height": 20})
+    later = PageButton(3, box={"x": 160, "y": 200, "width": 30, "height": 20})
+    page = JobListPage([JobListScope(pagination=PaginationElement([current, target, later]))])
+
+    assert next_page_target(page) == (135, 210)
+    assert target.scrolled is True
+    assert later.scrolled is False
+
+
+@pytest.mark.parametrize(
+    "pagination",
+    [
+        None,
+        PaginationElement([PageButton(1, current=True)]),
+        PaginationElement([PageButton(1, current=True), PageButton(2, disabled=True)]),
+        PaginationElement([PageButton(1), PageButton(2)]),
+    ],
+)
+def test_extract_next_page_target_returns_none_without_an_enabled_following_page(pagination):
+    assert next_page_target(JobListPage([JobListScope(pagination=pagination)])) is None

@@ -7,8 +7,9 @@
 > 根因确认是已加载详情的正文 selector 未命中；按目标 ID 提取 AboutTheJob
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
-> SearchResultsMainContent 列表 scope、card job identity 和数字分页语义；
-> 未修改生产代码。下一步为 Step 1，等待单独指令。
+> SearchResultsMainContent 列表 scope、card job identity 和数字分页语义。
+> **Step 1 已完成**：`extractor.py` 现已按该现场语义解析卡片和数字分页；
+> 下一步为 Step 2，等待单独指令。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -358,7 +359,24 @@ Plan文档里的示例selector。配套单测参照Plan第6节的覆盖要求写
 tests/test_extractor.py。
 ```
 
-验证：`pytest tests/test_extractor.py` + `verify.py`。单独commit。
+完成（2026-09-15）：
+
+- `extract_job_cards()` 只在唯一的
+  `[componentkey="SearchResultsMainContent"]` scope 内读取
+  `[role="button"][componentkey^="job-card-component-ref-"]`。它按已确认的
+  `p` 文本顺序取得 title/company/location，从 `componentkey` 提取 job ID，并只对
+  有有效 bounding box 的 card 返回中心坐标；没有 title 的 card 跳过，缺少可选字段
+  返回空字符串。
+- `extract_next_page_target()` 只在 scope 内的
+  `ul[data-testid="pagination-controls-list"]` 查找
+  `button[data-testid^="pagination-indicator-"]`，从 `aria-current="true"` 的
+  页码选择下一个可用数字按钮。不存在独立 Next 按钮的假设，也没有采用动态 class。
+  滚动目标后重新取得 bounding box。
+- 单测覆盖多 card 顺序、identity 缺失、title/salary 缺失、隐藏 card、唯一 scope、
+  下一个数字页、无分页/无当前页/禁用目标等安全返回。
+
+验证：`pytest tests/test_extractor.py` **28 passed**；`python scripts/verify.py`
+**PASS**；`git diff --check` **PASS**。单独 commit 后停止，不进入 Step 2。
 
 ---
 
