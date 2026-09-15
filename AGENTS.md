@@ -19,7 +19,7 @@ coding agent 在每次会话开始时自动读取。这里记录的是长期有�
 CareerAgent 是一个本地运行的求职岗位检索、提取与简历匹配工具。
 
 核心流程：Playwright 控制 Chrome 浏览招聘网站（默认 LinkedIn）→
-截图交给本地 Ollama 视觉模型识别岗位列表 → 对每个岗位提取详情文本
+DOM 提取岗位列表（Vision 语义识别仅作兼容/未适配页面 fallback）→ 对每个岗位提取详情文本
 → 交给本地 Ollama 文本模型做多简历匹配打分 → 结果保存为 JSON 到
 `output/` 目录 → 支持交互式多轮搜索。
 
@@ -57,14 +57,18 @@ CareerAgent 是一个本地运行的求职岗位检索、提取与简历匹配�
 
 | 模块 | 职责 |
 |---|---|
-| `agent/browser.py` | Playwright 生命周期、浏览器 context、页面导航、截图、`get_job_detail_text()`/`get_job_url()` |
-| `agent/vision.py` | 调用本地视觉模型解析截图，识别岗位列表 |
+| `agent/browser.py` | Playwright 生命周期、browser context、页面导航和截图；将 Page 传给 extractor 的详情、URL、岗位卡片和分页薄封装，并处理异常 |
+| `agent/vision.py` | 调用本地视觉模型解析截图；兼容 Vision 模式的岗位语义识别，以及 DOM 列表不可用或未适配页面时的语义 fallback；原始点击坐标不能作自动点击目标 |
 | `agent/actions.py` | 拟人化鼠标点击/延迟等交互原语 |
-| `agent/extractor.py` | 岗位详情文本提取 + URL 提取与规范化，供 `browser.py` 调用 |
+| `agent/extractor.py` | DOM 岗位卡片/数字分页解析、岗位详情文本提取、URL 提取与规范化；DOM selector 和解析逻辑只放在这里 |
 | `agent/matcher.py` | 简历与岗位的匹配打分，输出结构化结果 |
-| `main.py` | 编排以上模块：搜索 → 抓取 → 评分 → 保存 → 交互式循环 |
+| `main.py` | 编排配置选择的 DOM 主路径或 Vision 兼容路径、DOM 定位点击、详情提取、评分、保存和交互式循环 |
 
 新增能力前先确认属于哪个已有模块、能否直接扩展现有函数。
+
+（长期架构以 DOM 岗位列表提取为主；配置默认值暂时仍为 `vision`，用于
+观察 DOM 单页处理预算。Vision 保留为语义和未适配页面 fallback，不代表
+恢复以 Vision 原始坐标点击岗位。）
 
 ---
 
@@ -83,6 +87,29 @@ CareerAgent 是一个本地运行的求职岗位检索、提取与简历匹配�
   当前实现对多个兜底链接返回第一个匹配项，测试记录了这一行为。因此，
   如果页面只有侧边栏相似岗位链接，仍可能返回错误岗位 URL；除非真实
   场景证明需要更严格的关联校验，否则保留现有顺序和行为。
+
+- **岗位列表采用已确认的 DOM 语义，Vision 原始点击坐标不可靠**：早期
+  实现中 `_wait_for_job_list()` 及相关点击逻辑复用的四个选择器
+  （`li.jobs-search-results__list-item`、
+  `li[data-occludable-job-id]`、`.jobs-search-results-list__list-item`、
+  `.job-card-container`）已被真实诊断证实：在当前LinkedIn页面上
+  `query_selector_all()` 对这四个选择器全部返回空列表，不要认为
+  它们"已验证可用"并在新代码里复用。同时已证实 Ollama 视觉模型
+  返回的 `click_x`/`click_y` 本身不可靠（曾出现坐标数值超出压缩后
+  截图实际尺寸的情况），**不应作为点击目标的直接依据**。当前 LinkedIn
+  列表以 `[componentkey="SearchResultsMainContent"]` 为 scope、scope 内
+  `[role="button"][componentkey^="job-card-component-ref-"]` 为 card，job ID
+  从 component key 的固定前缀后取得；分页使用
+  `ul[data-testid="pagination-controls-list"]` 内
+  `button[data-testid^="pagination-indicator-"]` 的数字页按钮。DOM 列表提取
+  是长期主路径；每次点击按 job ID 重新 scroll 并取得当前 bounding box，再由
+  `HumanActions` 点击。DOM 列表不可用时，Vision 只能提供语义，仍须通过 DOM
+  resolver 定位真实 target；没有可靠 target 就 skip，绝不自动 fallback 到
+  Vision `click_x`/`click_y`。这个空白教训值得记住：之前"选择器已验证"的
+  错误判断，源于 `_wait_for_job_list()`
+  超时后静默降级、不抛异常，导致"没有报错"被误读成"逻辑正确"——
+  验证选择器是否可用，必须主动确认匹配到的元素数量，不能只看
+  有没有异常。
 
 - **ResumeMatcher 的评分结果契约**：`score_job()` 正常返回
   `{"score": float, "reason": str, "selected_resume": str,

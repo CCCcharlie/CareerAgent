@@ -8,8 +8,9 @@
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
 > SearchResultsMainContent 列表 scope、card job identity 和数字分页语义。
-> **Step 1~5 已完成**：真实单页比较确认默认 Vision 无回归，DOM identity
-> 重取 click box 后连续正确点击并提取详情。Step 6 需单独指令，不自动进入。
+> **Step 1~6 已完成**：真实单页比较确认默认 Vision 无回归，DOM identity
+> 重取 click box 后连续正确点击并提取详情；长期架构已收尾，默认模式仍为
+> `vision`，等待 DOM 处理预算优化的观察结果。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -492,15 +493,34 @@ DOM target，绝不使用 Vision raw click coordinates”的行为已由回归�
 
 ---
 
-## Step 6：收尾
+## Step 6：架构与文档收尾（已完成，2026-09-15）
 
-对应 `DOM_EXTRACTION_PLAN.md` 第7节第6步 + 第8节（Vision定位更新）。
+Step 5 的真实比较已满足功能正确性条件：Vision 为 3 jobs、1 correct、1 detail
+success、0 wrong；DOM 在 180 秒 smoke 预算内处理 13 个岗位，12 correct、12 detail
+success、0 wrong，数字分页正确命中 Page 2。DOM 首轮发现的 scroll 后 stale
+bounding box 已以每次点击前按 job ID 重新定位并取 box 的最小修复解决。
 
-```
-确认DOM模式稳定后，请阅读 docs/DOM_EXTRACTION_PLAN.md 第8节，
-按其中描述更新AGENTS.md第4节里agent/vision.py的职责说明；同时
-判断page_type=="job_detail"分支是否已成死代码，记录但不清理。
-```
+- **长期模块职责**：DOM list extraction 是岗位列表的长期主路径；`extractor.py`
+  保留 DOM 解析，`browser.py` 只作 Page 传递和异常处理，`main.py` 编排两条模式
+  及既有详情/评分链路。`HumanActions` 保持不变。
+- **Vision 的定位**：Vision 不删除，保留为 Vision 模式的岗位语义能力，以及 DOM
+  列表不可用或页面尚未适配时的 semantic fallback。该 fallback 必须经 A.3 DOM
+  resolver 取得真实 card；Vision raw `click_x` / `click_y` 仍不是自动 fallback。
+- **旧 page type 结论**：`agent/vision.py` 仍可产出 `page_type="job_detail"`，但
+  `main.py` 没有独立的 `page_type == "job_detail"` 分支；仅保留 Vision 路径和
+  hybrid fallback 的通用 `page_type != "job_list"` 停止 guard。因此这是 legacy
+  prompt/output capability，记录但本 Step 不删除。
+- **默认值**：`config.yaml` 的 `extraction.job_list_mode` 保持 `"vision"`。DOM
+  正确性已验证，但单页运行仍达到 smoke 180 秒预算，先保留观察窗口，不在本 Step
+  切换默认值。
+- **后续独立优化方向**：
+  1. DOM performance / processing-budget optimization：缩短单页处理时间，并建立
+     足以决定默认值切换的预算基线。
+  2. Vision fallback consolidation：后续可将 main branch 的稳定 Vision 实现与当前
+     实现逐项比较，只移植必要能力；不得整段回退当前 DOM 架构。
+
+验证：`pytest tests/`、`python -X utf8 scripts/verify.py` 和 `git diff --check`
+均须通过后单独提交；完成后停止，不进入新的功能 Step。
 
 ---
 
