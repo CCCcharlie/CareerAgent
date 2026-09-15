@@ -135,6 +135,28 @@ class BrowserManager:
             print(f"⚠️ URL提取失败：{exc}")
             return None
 
+    async def get_job_cards(self) -> list[dict]:
+        """Return structured job cards from the current search-results page."""
+        if not self.page:
+            return []
+
+        try:
+            return await UniversalJobDescriptionExtractor(self.page).extract_job_cards()
+        except Exception as exc:
+            print(f"Job card extraction failed: {exc}")
+            return []
+
+    async def get_next_page_target(self) -> Optional[tuple[float, float]]:
+        """Return the next numeric pagination target, if one is available."""
+        if not self.page:
+            return None
+
+        try:
+            return await UniversalJobDescriptionExtractor(self.page).extract_next_page_target()
+        except Exception as exc:
+            print(f"Next-page target extraction failed: {exc}")
+            return None
+
     async def close(self) -> None:
         """安全关闭页面、上下文和浏览器。"""
         try:

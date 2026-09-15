@@ -8,8 +8,8 @@
 > 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
 > A.3 resolver 和 HumanActions 未改动。**Step 0 已完成侦察**：确认左侧
 > SearchResultsMainContent 列表 scope、card job identity 和数字分页语义。
-> **Step 1 已完成**：`extractor.py` 现已按该现场语义解析卡片和数字分页；
-> 下一步为 Step 2，等待单独指令。
+> **Step 1、Step 2 已完成**：`extractor.py` 解析 DOM，`browser.py` 只作安全薄封装；
+> 下一步为 Step 3，等待单独指令。
 > `docs/DOM_EXTRACTION_RUNSHEET.md` 是唯一 active Runsheet；后续开发只引用
 > 此标准文件名。
 
@@ -391,7 +391,17 @@ tests/test_extractor.py。
 get_job_detail_text()/get_job_url()的做法。
 ```
 
-验证：`py_compile` + import检查 + `verify.py`。单独commit。
+完成（2026-09-15）：
+
+- `BrowserManager.get_job_cards()` 只向当前 `Page` 创建
+  `UniversalJobDescriptionExtractor` 并转调 `extract_job_cards()`；没有 page 或
+  extractor 异常时返回空列表。
+- `BrowserManager.get_next_page_target()` 对应转调
+  `extract_next_page_target()`；没有 page 或异常时返回 `None`。
+- browser 层没有新增 selector、DOM 解析或 main/Vision/HumanActions 改动。
+
+验证：`pytest tests/test_browser.py` **5 passed**；`python -X utf8 scripts/verify.py`
+**PASS**；`git diff --check` **PASS**。单独 commit 后停止，不进入 Step 3。
 
 ---
 
