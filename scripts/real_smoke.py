@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT))
 
 from main import (AutomationBlocked, HumanActions, JobScraper, JOB_LIST_SCOPE,
                   JOB_CARD_SELECTOR, SMOKE_COUNTERS, _read_yaml_async)
+from agent.extractor import UniversalJobDescriptionExtractor
 
 
 SmokeBlocked = AutomationBlocked
@@ -62,6 +63,32 @@ async def run_search(url, output_dir):
     config.setdefault("search", {})["max_pages"] = 1
     scraper = JobScraper(config=config, resume_texts={}, base_dir=ROOT)
     report = {"search_url": url, "max_pages": 1, "status": "RUNNING"}
+
+    async def detail_observer(page, phase, context, text):
+        await check_access(page)
+        state = await page.evaluate("""selectors => {
+            const visible = e => !!(e.getClientRects().length &&
+                getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none');
+            const attrs = e => Object.fromEntries([...e.attributes].filter(a => a.name !== 'class').map(a => [a.name,a.value]));
+            return {page_title:document.title, url:location.href,
+                selectors:selectors.map(selector => {
+                    const elements = [...document.querySelectorAll(selector)];
+                    return {selector,match_count:elements.length,elements:elements.map(e => ({
+                        visible:visible(e),inner_text_length:(e.innerText||'').length,
+                        text_preview:(e.innerText||'').slice(0,160),attributes:attrs(e)}))};
+                }),
+                detail_nodes:[...document.querySelectorAll('[data-sdui-component],[componentkey],[id]')]
+                    .filter(e => !e.closest('[componentkey="SearchResultsMainContent"]') &&
+                        /job.*(detail|description)|description/i.test(JSON.stringify(attrs(e))))
+                    .map(e => ({attributes:attrs(e),visible:visible(e),
+                        inner_text_length:(e.innerText||'').length,html:e.outerHTML}))};
+        }""", list(UniversalJobDescriptionExtractor.DESCRIPTION_SELECTORS))
+        evidence = {**context, "phase": phase, "detail_text_length": len(text) if text is not None else None,
+                    **state}
+        number = len(report.get("detail_evidence", [])) + 1
+        filename = f"detail_{number:02d}_{context['target_job_id']}_{phase}.json"
+        (output_dir / filename).write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        report.setdefault("detail_evidence", []).append(filename)
     try:
         page = await scraper.browser.start()
         behavior = config.get("behavior", {})
@@ -78,7 +105,8 @@ async def run_search(url, output_dir):
         await capture_screenshot(page, output_dir / "before.png", report)
         # Exercise the same Vision/resolver/actions/extractor as production.
         # Resume scoring is unrelated to this search-click smoke.
-        await scraper._crawl_and_score(page, score_jobs=False, access_check=check_access)
+        await scraper._crawl_and_score(page, score_jobs=False, access_check=check_access,
+                                       detail_observer=detail_observer)
         await check_access(page)
         await capture_screenshot(page, output_dir / "after.png", report)
         if not scraper.crawl_stats["VISION_JOBS"]:

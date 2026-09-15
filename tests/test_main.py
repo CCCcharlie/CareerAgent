@@ -79,7 +79,7 @@ class FakeBrowser:
     async def get_job_url(self):
         return "https://www.linkedin.com/jobs/view/123456/"
 
-    async def get_job_detail_text(self):
+    async def get_job_detail_text(self, expected_job_id=None):
         return "A detailed job description " * 10
 
 
@@ -382,7 +382,7 @@ def test_click_without_exception_is_not_detail_success(monkeypatch):
     monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
     scraper = make_scraper()
 
-    async def empty_detail():
+    async def empty_detail(expected_job_id=None):
         return ""
 
     scraper.browser.get_job_detail_text = empty_detail
@@ -447,3 +447,28 @@ def test_missing_list_scope_does_not_match_detail_panel_title():
     result = asyncio.run(make_scraper()._resolve_job_click_coordinates(
         DetailOnlyPage(), {"title": "Software Engineer"}))
     assert result["status"] == "DOM_RESOLVE_FAILED"
+
+
+@pytest.mark.parametrize("correct", [True, False])
+def test_detail_evidence_only_runs_after_correct_job(correct, monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+    scraper = make_scraper()
+    page = FakePage()
+    if not correct:
+        page.url = "https://www.linkedin.com/jobs/search/?currentJobId=999"
+    observations = []
+
+    async def observer(current_page, phase, context, text):
+        assert scraper.crawl_stats["CORRECT_JOB"] == 1
+        assert context["target_job_id"] == "123456"
+        assert context["before_click_url"] == page.url
+        assert context["after_click_url"] == page.url
+        observations.append((phase, text))
+
+    asyncio.run(scraper._crawl_and_score(page, detail_observer=observer))
+    if correct:
+        assert [phase for phase, text in observations] == ["before_extract", "after_extract"]
+        assert observations[0][1] is None
+        assert len(observations[1][1]) >= 100
+    else:
+        assert observations == []

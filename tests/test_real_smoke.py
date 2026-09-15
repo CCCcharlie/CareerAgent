@@ -44,9 +44,10 @@ def test_search_smoke_is_noninteractive_one_page_and_always_closes(tmp_path, mon
             assert config["search"]["max_pages"] == 1
             self.browser = Browser()
 
-        async def _crawl_and_score(self, page, *, score_jobs, access_check):
+        async def _crawl_and_score(self, page, *, score_jobs, access_check, detail_observer):
             assert score_jobs is False
             assert access_check is check
+            assert callable(detail_observer)
             calls.append("crawl")
             self.crawl_stats = dict.fromkeys(real_smoke.SMOKE_COUNTERS, 0)
             self.crawl_stats["VISION_JOBS"] = vision_jobs

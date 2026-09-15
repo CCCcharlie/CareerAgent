@@ -1,11 +1,12 @@
 # DOM 列表提取迁移 —— Runsheet
 
-> **当前进度（2026-09-14）**：Step A.3 开发和自动 Search smoke 已完成，
-> 按决策门 B 收尾：Vision 7，DOM resolved 3 / skipped 4，正确点击 3、
-> 错误点击 0；detail 成功 0 / 失败 3。下一步 Step A.4 = detail load /
-> extractor timing。点击 resolver 保持本轮实现，不继续堆匹配 heuristic。
-> 本轮不进入 Step 0~6 / A.4。施工基线是 feature/integrate-wip 的
-> d5100fe，fetch 后落后 0 / 领先 2，无未知生产代码修改。
+> **当前进度（2026-09-15）**：A.3 已完成（`4a2b9d0`）：7 Vision /
+> 3 correct / 0 wrong / 0 detail success / 3 detail failed。
+> **A.4 已完成真实验证**：5 Vision / 3 correct / 0 wrong /
+> 3 detail success / 0 detail failed，NOT_LOADED / SELECTOR_MISS / EMPTY 均为 0。
+> 根因确认是已加载详情的正文 selector 未命中；按目标 ID 提取 AboutTheJob
+> 正文并检查就绪状态后，正确点击后的详情成功率由 0/3 提升到 3/3。
+> A.3 resolver 和 HumanActions 未改动；A.4 单独提交后停止，不进入 Step 0。
 > 本标准路径文档基于现有 DOM_EXTRACTION_RUNSHEET (2).md 整理，原文件保留。
 
 ---
@@ -215,6 +216,104 @@ modified by this step. The existing user-modified AGENTS.md is preserved.
 
 ---
 
+## Step A.4：详情加载与正文提取（已完成）
+
+读取 BrowserManager -> extractor 调用链及点击后等待逻辑，不预设 selector
+或时机是根因。自动 Search smoke 仅在 CORRECT_JOB 后记录 target title/ID、
+点击前后 URL、页面 title、等待条件、每个正文 selector 的匹配数量、可见性、
+innerText 长度及最终提取长度；长 JSON/HTML 写入本次 smoke 输出目录。
+
+失败分别归类为 DETAIL_NOT_LOADED、DETAIL_SELECTOR_MISS
+（DETAIL_LOADED_SELECTOR_MISS）或 DETAIL_EMPTY（DETAIL_ELEMENT_FOUND_BUT_EMPTY）。
+根据真实证据修复显式 DOM 等待和/或正文 selector，不用固定 sleep 加时掩盖问题。
+WRONG_JOB_CLICK 只记录，不修改 A.3。若详情已加载且 selector 正确但仍无法提取，
+保存证据并停止猜测，不进入完整 DOM migration。
+
+完成 targeted tests、verify、diff check 和自动 Search smoke 后，与 A.3 的
+3 correct / 0 wrong / 0 detail success / 3 detail failed 比较，记录结果并单独
+提交 A.4。保留 AGENTS.md 现有修改，不修改 matcher、Vision、actions 或 verify.py。
+
+**已确认根因与修复**：
+
+根因是 `DETAIL_LOADED_SELECTOR_MISS`，对应统计名 `DETAIL_SELECTOR_MISS`。
+在 `output/real_smoke_20260914_182815/` 保存的真实证据中，目标
+`D365 Application Developer - FinOps` 的 job ID 为 `4463596080`，
+页面 title 与目标一致，`JobDetails_AboutTheJob_4463596080` 可见且容器文本
+长度为 2037；旧七个正文 selector 全部匹配 0。不是依据猜测增加等待时间。
+
+正文采用已观察到的语义 selector：
+
+```css
+[data-sdui-component="com.linkedin.sdui.generated.jobseeker.dsl.impl.aboutTheJob"] [data-testid="expandable-text-box"]
+```
+
+有 target job ID 时，限定在 `JobDetails_AboutTheJob_<id>` 内，最多等待 10 秒，
+条件是实际 URL ID 正确、目标容器可见、内部正文可见且清理后不少于 100 字符。
+同一次 DOM 读取返回正文，避免 URL 已切换但仍读取旧面板；超时安全失败并记录
+NOT_LOADED / SELECTOR_MISS / EMPTY 分类。未确认等待不足是本次 0% 的根因，
+此等待用于保证目标正文已就绪，没有新增固定 sleep。
+
+无目标 ID 时，新正文 selector 优先，保留旧 selector 的相对 fallback 顺序；
+隐藏、空和过短元素不视为成功，正文只清理行首尾空白/空行，不截断内容。
+BrowserManager 传递目标 ID 并保留提取状态；main 仅扩展详情调用及分类统计。
+A.3 resolver 经 AST 对比与 `4a2b9d0` 一致。
+
+Search smoke 的详情观察钩子仅在 CORRECT_JOB 后运行，逐次保存 before/after
+证据，文件名带序号避免重复岗位覆盖。该能力保留在开发 harness 中；一次性
+日志/HTML/JSON 留在本地输出目录，不纳入提交，也不删除已有证据。
+
+**已恢复的上轮结果**：`output/real_smoke_20260914_183455/result.json` 实际为
+`COMPLETED`，并非抓取未完成。Vision 6，DOM resolved 1 / failed 2 / ambiguous 3，
+correct 1 / wrong 0，detail success 1 / failed 0，三个详情失败分类均为 0。
+`Full stack Developer`（`4465493673`）正文 4640 字符，等待未超时。
+结束截图有超时告警，核心抓取和证据文件已完成，浏览器正常关闭。
+
+**恢复后验证**：targeted tests 57 passed；verify PASS（全量 64 项测试）；
+diff check PASS。恢复后未修改正式实现，继续用同一 Search smoke 验证。
+
+**恢复后最终真实结果（2026-09-15）**：
+
+`output/real_smoke_20260915_121142/result.json` 为 `COMPLETED`，进程退出码 0，
+浏览器自动关闭。本轮使用相同 search URL、现有 Chrome profile、正式 Vision /
+DOM resolver / HumanActions / extractor，max_pages=1，无人工搜索或按回车。
+Ollama 原先未运行，启动已有本地服务后，本轮没有发生 HTTP 500、登录或安全挑战。
+
+| 指标 | A.3 基线 | A.4 最终 smoke |
+|---|---:|---:|
+| VISION_JOBS | 7 | 5 |
+| DOM_RESOLVE_SUCCESS | 3 | 3 |
+| DOM_RESOLVE_FAILED | 1 | 0 |
+| AMBIGUOUS_DOM_MATCH | 3 | 2 |
+| CLICKS | 3 | 3 |
+| CORRECT_JOB | 3 | 3 |
+| WRONG_JOB_CLICK | 0 | 0 |
+| DETAIL_NOT_LOADED | 未分类 | 0 |
+| DETAIL_SELECTOR_MISS | 未分类 | 0 |
+| DETAIL_EMPTY | 未分类 | 0 |
+| DETAIL_SUCCESS | 0 | 3 |
+| DETAIL_FAILED | 3 | 0 |
+
+| 成功详情 | target / actual job ID | 完整正文字符数 | 等待超时 |
+|---|---|---:|---|
+| Software Developer | 4462913805 | 5719 | 否 |
+| Haskell Developer (AU & NZ) | 4407747256 | 4118 | 否 |
+| Associate Software Engineer | 4462553046 | 5018 | 否 |
+
+每次正确点击都有两份带序号的 `detail_*_before_extract.json` /
+`detail_*_after_extract.json`，共六份，记录 URL、目标 ID、页面 title、等待条件、
+selector match count / visible / innerText length 和最终提取长度。正文读取没有
+截断。结束时 `after.png` 超时 5 秒，记录为 artifact warning；该可选截图未生成，
+核心结果、详情证据、run.log 和 before.png 已保存，不修改正文代码来处理截图问题。
+
+结论：正确点击后的详情成功率由 **0/3（0%）改善到 3/3（100%）**，A.4 修复方向
+已由真实 smoke 验证。两个轮次的实时岗位集合不同，样本仅一页，不推断长期全站
+成功率。停止本 Step，不继续实现完整 DOM job-list migration。
+
+最终提交范围（9 个文件）：`agent/extractor.py`、`agent/browser.py`、`main.py`、
+`scripts/real_smoke.py`、`tests/test_extractor.py`、`tests/test_browser.py`、
+`tests/test_main.py`、`tests/test_real_smoke.py`、本 Runsheet。原有 `AGENTS.md`
+修改、用户草稿和历史/本次诊断证据均不暂存；没有待提交的一次性临时脚本。
+
 ## Step 0：选择器侦察
 
 对应 `DOM_EXTRACTION_PLAN.md` 第3节。人工需要做的事：正常启动
@@ -321,5 +420,4 @@ Plan文档里没有这部分，是这次排障新发现的缺口，需要新写�
 - 先读现有代码/AGENTS.md，只读审查在前，改动在后
 - 每步验证：`pytest` → `verify.py` → `git diff --check` → 单独
   commit
-- Step A.3是当前最高优先级，Step 0~6在A.3验证通过、成功率有实质
-  改善之后再继续，不要在坐标/点击问题没解决之前开始完整列表迁移
+- A.3 已完成；A.4 单独验证并提交后停止，不自动进入 Step 0~6 的完整列表迁移。

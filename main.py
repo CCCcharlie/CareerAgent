@@ -22,6 +22,7 @@ SMOKE_COUNTERS = (
     "VISION_JOBS", "DOM_RESOLVE_SUCCESS", "DOM_RESOLVE_FAILED",
     "AMBIGUOUS_DOM_MATCH", "CLICKS", "CORRECT_JOB", "WRONG_JOB_CLICK",
     "DETAIL_SUCCESS", "DETAIL_FAILED",
+    "DETAIL_NOT_LOADED", "DETAIL_SELECTOR_MISS", "DETAIL_EMPTY",
 )
 
 
@@ -304,7 +305,7 @@ class JobScraper:
         except Exception as exc:
             return {"status": "DOM_RESOLVE_FAILED", "reason": str(exc)}
 
-    async def _extract_job_after_dom_click(self, page, job, access_check=None):
+    async def _extract_job_after_dom_click(self, page, job, access_check=None, detail_observer=None):
         target = await self._resolve_job_click_coordinates(page, job)
         self._record_click_event(target["status"], title=job.get("title"),
                                  **{k: v for k, v in target.items() if k != "status"})
@@ -312,6 +313,7 @@ class JobScraper:
             return None
         clicked = blocked = False
         detail_status_recorded = False
+        before_click_url = page.url
         try:
             if access_check:
                 await access_check(page)
@@ -334,15 +336,27 @@ class JobScraper:
                     return None
                 self._record_click_event("CORRECT_JOB", target_job_id=actual_id,
                                          resulting_url=resulting_url)
-            detail_text = await self.browser.get_job_detail_text()
+            detail_context = {"target_title": target["dom_title"],
+                "target_job_id": target["target_job_id"], "before_click_url": before_click_url,
+                "after_click_url": resulting_url,
+                "wait": "HumanActions delay + random_delay(1, 3), then target URL ID + visible target AboutTheJob/body >= 100 chars (10s timeout)"}
+            if detail_observer and target["target_job_id"]:
+                await detail_observer(page, "before_extract", detail_context, None)
+            detail_text = await self.browser.get_job_detail_text(expected_job_id=target["target_job_id"])
             if access_check:
                 await access_check(page)
+            if detail_observer and target["target_job_id"]:
+                detail_context["extraction"] = getattr(self.browser, "last_detail_diagnostic", {})
+                await detail_observer(page, "after_extract", detail_context, detail_text)
             status = "DETAIL_SUCCESS" if detail_text and len(detail_text.strip()) >= 100 else "DETAIL_FAILED"
             self._record_click_event(status, title=job.get("title"),
                 target_job_id=target["target_job_id"], x=target["x"], y=target["y"],
                 resulting_url=resulting_url, detail_text_length=len(detail_text or ""))
             detail_status_recorded = True
             if status == "DETAIL_FAILED":
+                failure = getattr(self.browser, "last_detail_diagnostic", {}).get("status", "DETAIL_EMPTY")
+                if failure in ("DETAIL_NOT_LOADED", "DETAIL_SELECTOR_MISS", "DETAIL_EMPTY"):
+                    self._record_click_event(failure, title=job.get("title"), target_job_id=target["target_job_id"])
                 return None
             job_url = await self.browser.get_job_url()
             return job_url, detail_text
@@ -361,7 +375,7 @@ class JobScraper:
                 except Exception:
                     pass
 
-    async def _crawl_and_score(self, page, *, score_jobs=True, access_check=None) -> None:
+    async def _crawl_and_score(self, page, *, score_jobs=True, access_check=None, detail_observer=None) -> None:
         """按页循环抓取岗位并进行匹配评分。"""
         max_pages = int(self.config.get("search", {}).get("max_pages", 5))
         min_score = float(self.config.get("match", {}).get("min_score", 6))
@@ -398,7 +412,7 @@ class JobScraper:
                 tags = job.get("tags", [])
                 if access_check:
                     await access_check(page)
-                extracted = await self._extract_job_after_dom_click(page, job, access_check)
+                extracted = await self._extract_job_after_dom_click(page, job, access_check, detail_observer)
                 if extracted is None or not score_jobs:
                     continue
                 job_url, detail_text = extracted

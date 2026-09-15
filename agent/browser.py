@@ -104,18 +104,21 @@ class BrowserManager:
             """
         )
 
-    async def get_job_detail_text(self) -> str:
+    async def get_job_detail_text(self, expected_job_id=None) -> str:
         """提取当前岗位详情正文，不依赖 URL 提取成功。"""
         if not self.page:
             raise RuntimeError("页面未初始化，无法提取文本。")
 
+        self.last_detail_diagnostic = {}
         try:
             extractor = UniversalJobDescriptionExtractor(self.page)
-            description = await extractor.extract_description()
+            description = await extractor.extract_description(expected_job_id=expected_job_id)
+            self.last_detail_diagnostic = extractor.detail_diagnostic
             if description:
                 return description
             return ""
         except Exception as exc:
+            self.last_detail_diagnostic = {"status": "DETAIL_NOT_LOADED", "reason": str(exc)}
             print(f"⚠️ 提取岗位详情失败：{exc}")
             return ""
 
