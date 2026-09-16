@@ -156,7 +156,8 @@ def test_e2e_runs_scoring_and_saves_output(tmp_path, monkeypatch):
         async def _crawl_and_score(self, page, *, score_jobs, access_check, detail_observer):
             assert score_jobs is True
             self.crawl_stats = dict.fromkeys(real_smoke.SMOKE_COUNTERS, 0)
-            self.crawl_stats.update(CORRECT_JOB=1, DETAIL_SUCCESS=1)
+            self.crawl_stats.update(CORRECT_JOB=1, DETAIL_SUCCESS=1, MATCH_SUCCESS=1,
+                                    THRESHOLD_PASS=1)
             self.jobs = [{"score": 8.0}]
             self.click_events = []
             calls.append("crawl")
@@ -187,6 +188,11 @@ def test_e2e_runs_scoring_and_saves_output(tmp_path, monkeypatch):
         "CORRECT_JOB": 1,
         "DETAIL_SUCCESS": 1,
         "MATCH_SUCCESS": 1,
+        "MATCH_FAILED": 0,
+        "ACCEPTED_JOBS": 1,
+        "THRESHOLD_PASS": 1,
+        "THRESHOLD_REJECT": 0,
+        "output_scores_meet_threshold": True,
         "output_json_exists": True,
     }
     assert "crawl" in calls

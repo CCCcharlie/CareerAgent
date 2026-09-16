@@ -23,6 +23,7 @@ SMOKE_COUNTERS = (
     "AMBIGUOUS_DOM_MATCH", "CLICKS", "CORRECT_JOB", "WRONG_JOB_CLICK",
     "DETAIL_SUCCESS", "DETAIL_FAILED",
     "DETAIL_NOT_LOADED", "DETAIL_SELECTOR_MISS", "DETAIL_EMPTY",
+    "MATCH_SUCCESS", "MATCH_FAILED", "THRESHOLD_PASS", "THRESHOLD_REJECT",
 )
 
 
@@ -392,7 +393,8 @@ class JobScraper:
                 except Exception:
                     pass
 
-    async def _crawl_and_score(self, page, *, score_jobs=True, access_check=None, detail_observer=None) -> None:
+    async def _crawl_and_score(self, page, *, score_jobs=True, access_check=None,
+                               detail_observer=None, max_jobs=None) -> None:
         """按页循环抓取岗位并进行匹配评分。"""
         max_pages = int(self.config.get("search", {}).get("max_pages", 5))
         min_score = float(self.config.get("match", {}).get("min_score", 6))
@@ -449,6 +451,9 @@ class JobScraper:
                 if not jobs:
                     print("⚠️ 本页未识别到岗位。")
 
+            if max_jobs is not None:
+                jobs = jobs[:max_jobs]
+
             for idx, job in enumerate(jobs, start=1):
                 title = str(job.get("title", "")).strip()
                 company = str(job.get("company", "")).strip()
@@ -475,7 +480,14 @@ class JobScraper:
                     analysis = str(match.get("analysis", ""))
                     print(f"✅ 评分：{score} | 理由：{reason}")
 
+                    if reason not in ("请求失败", "处理异常", "解析失败"):
+                        self.crawl_stats["MATCH_SUCCESS"] += 1
+                    else:
+                        self.crawl_stats["MATCH_FAILED"] += 1
+                        continue
+
                     if score >= min_score:
+                        self.crawl_stats["THRESHOLD_PASS"] += 1
                         self.jobs.append(
                             {
                                 "title": title,
@@ -493,6 +505,7 @@ class JobScraper:
                             }
                         )
                     else:
+                        self.crawl_stats["THRESHOLD_REJECT"] += 1
                         print(f"⚠️ 分数低于阈值({min_score})，不纳入结果。")
                 except Exception as exc:
                     print(f"❌ 处理岗位失败：{exc}")

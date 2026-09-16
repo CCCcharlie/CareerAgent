@@ -119,7 +119,7 @@ git diff --check
 
 # R2 — Integrated MVP E2E
 
-状态：NEXT（R0 已完成，R1 不需要）
+状态：COMPLETED（2026-09-16）
 
 **开发验收方式：自动 E2E smoke。** 正式 `main.py` 仍保持用户在 LinkedIn
 完成搜索后回终端按 Enter 的产品交互；开发阶段不再要求用户运行 `main.py`。
@@ -158,14 +158,26 @@ output JSON exists
 
 实际结果：
 
-* 已扩展 `scripts/real_smoke.py --e2e`，默认 CLI mode 为 `dom`；待执行真实
-  LinkedIn E2E。
+* `scripts/real_smoke.py --e2e --job-list-mode dom` 已完成真实 LinkedIn E2E，
+  本次自动 smoke 最多处理 3 个岗位；正式 `main.py` 的默认行为未改变。
+* R2 artifact：`output/real_smoke_20260916_144658/result.json`。
+* gate：`CORRECT_JOB=3`、`DETAIL_SUCCESS=3`、`MATCH_SUCCESS=3`、
+  `MATCH_FAILED=0`、`ACCEPTED_JOBS=3`、`THRESHOLD_PASS=3`、
+  `THRESHOLD_REJECT=0`、`output_scores_meet_threshold=true`。
+* output artifact：`output/jobs_20260916_144954.json`，共 3 条，分数为
+  `8.48`、`7.83`、`7.42`，全部满足 `min_score=6`；低于 threshold 的岗位未进入
+  output（本次没有低分岗位，过滤逻辑由 gate 与 targeted test 覆盖）。
+* targeted test：`tests/test_real_smoke.py`，`12 passed`。
+* 为支持 MVP 的 1~3 岗位自动验收，新增可选 `_crawl_and_score(...,
+  max_jobs=None)`；仅 `real_smoke --e2e` 默认传 `3`。同时将 matcher 有效返回、
+  threshold 通过/拒绝与 accepted output 分开计数；未修改 matcher contract、
+  DOM/Vision 或 R1。
 
 ---
 
 # R3 — MVP Checkpoint
 
-状态：WAITING_FOR_R2
+状态：COMPLETED（2026-09-16）
 
 给 Agent：
 
@@ -191,6 +203,23 @@ git status --short
 - output artifact
 
 完成后停止。
+```
+
+实际结果：
+
+* `pytest tests/`：`86 passed`。
+* `python -X utf8 scripts/verify.py`：全部检查 PASS。
+* `git diff --check`：PASS。
+* `git status --short` 已检查；本轮修改为 `main.py`、
+  `scripts/real_smoke.py`、`tests/test_main.py`、`tests/test_real_smoke.py` 和本 Runsheet。工作区中
+  既有 debug artifacts 未删除、未纳入本轮修复。
+* 未创建 commit；commit hash 不适用。
+* E2E 与 output artifact 使用 R2 实际结果：
+  `output/real_smoke_20260916_144658/result.json`、
+  `output/jobs_20260916_144954.json`。
+
+```text
+PRODUCT_RUNNABLE_MVP = PASS
 ```
 
 R3 完成后：

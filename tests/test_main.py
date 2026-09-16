@@ -114,6 +114,11 @@ class FakeMatcher:
         }
 
 
+class FailedMatcher:
+    async def score_job(self, **kwargs):
+        return {"score": 5.0, "reason": "请求失败"}
+
+
 class FakeSearchPage:
     def __init__(self):
         self.gotos = []
@@ -174,6 +179,24 @@ def test_crawl_and_score_preserves_full_match_result():
             "analysis": "Python experience matches the role.",
         }
     ]
+
+
+def test_crawl_and_score_skips_threshold_for_match_failure():
+    scraper = main.JobScraper.__new__(main.JobScraper)
+    scraper.config = {"search": {"max_pages": 1}, "match": {"min_score": 6}}
+    scraper.jobs = []
+    scraper.actions = FakeActions()
+    scraper.browser = FakeBrowser()
+    scraper.vision = FakeVision()
+    scraper.matcher = FailedMatcher()
+
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    assert scraper.jobs == []
+    assert scraper.crawl_stats["MATCH_SUCCESS"] == 0
+    assert scraper.crawl_stats["MATCH_FAILED"] == 1
+    assert scraper.crawl_stats["THRESHOLD_PASS"] == 0
+    assert scraper.crawl_stats["THRESHOLD_REJECT"] == 0
 
 
 def test_search_jobs_uses_manual_linkedin_search(monkeypatch):
