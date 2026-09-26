@@ -181,6 +181,39 @@ def test_crawl_and_score_preserves_full_match_result():
     ]
 
 
+def test_console_job_result_hides_raw_event_fields_and_marks_threshold(capsys, monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+    scraper = make_scraper()
+
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    output = capsys.readouterr().out
+    assert "[1] Software Engineer | 8.5/10 ✅" in output
+    assert "    strong fit" in output
+    assert "DOM_RESOLVE_SUCCESS" not in output
+    assert "CLICKS" not in output
+    assert "CORRECT_JOB" not in output
+    assert "DETAIL_SUCCESS" not in output
+    assert "x" not in output
+    assert "currentJobId" not in output
+
+
+def test_console_job_result_marks_score_below_threshold(capsys, monkeypatch):
+    monkeypatch.setattr(main.asyncio, "sleep", _noop_sleep)
+    scraper = make_scraper()
+
+    class LowScoreMatcher:
+        async def score_job(self, **kwargs):
+            return {"score": 5.5, "reason": "partial fit"}
+
+    scraper.matcher = LowScoreMatcher()
+    asyncio.run(scraper._crawl_and_score(FakePage()))
+
+    output = capsys.readouterr().out
+    assert "[1] Software Engineer | 5.5/10 ❌" in output
+    assert "    partial fit" in output
+
+
 def test_crawl_and_score_skips_threshold_for_match_failure():
     scraper = main.JobScraper.__new__(main.JobScraper)
     scraper.config = {"search": {"max_pages": 1}, "match": {"min_score": 6}}
@@ -558,9 +591,13 @@ def test_dom_mode_uses_card_identity_and_fresh_dom_box_without_vision(monkeypatc
         async def analyze_page(self, *args):
             pytest.fail("DOM cards must not invoke Vision enumeration")
 
+    class DomOnlyBrowser(DomBrowser):
+        async def screenshot(self):
+            pytest.fail("DOM cards must not request a Vision screenshot")
+
     scraper = make_scraper()
     scraper.config["extraction"] = {"job_list_mode": "dom"}
-    browser = DomBrowser([[dom_card()]])
+    browser = DomOnlyBrowser([[dom_card()]])
     scraper.browser = browser
     scraper.vision = ForbiddenVision()
     card = FakeCard()

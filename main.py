@@ -267,7 +267,6 @@ class JobScraper:
         if status in self.crawl_stats:
             self.crawl_stats[status] += 1
         self.click_events.append({"status": status, **fields})
-        print(f"{status} {json.dumps(fields, ensure_ascii=False)}")
 
     async def _resolve_job_click_coordinates(self, page, job: dict) -> dict:
         """Resolve a unique real card; never consume Vision click coordinates.
@@ -478,7 +477,9 @@ class JobScraper:
                     selected_resume = str(match.get("selected_resume", "unknown"))
                     dimension_scores = match.get("dimension_scores", {})
                     analysis = str(match.get("analysis", ""))
-                    print(f"✅ 评分：{score} | 理由：{reason}")
+                    marker = "✅" if score >= min_score else "❌"
+                    print(f"[{idx}] {title} | {score:g}/10 {marker}")
+                    print(f"    {reason}")
 
                     if reason not in ("请求失败", "处理异常", "解析失败"):
                         self.crawl_stats["MATCH_SUCCESS"] += 1

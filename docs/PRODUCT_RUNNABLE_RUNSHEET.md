@@ -37,10 +37,6 @@
 读取：
 - AGENTS.md
 - docs/PRODUCT_RUNNABLE_PLAN.md 的 Golden Baseline / R0 部分
-- 当前 feature/integrate-wip
-- master 中对应稳定 MVP 实现
-
-目标只是确认当前真正阻断 MVP 的 regression。
 
 重点检查：
 - 正式交互流程
@@ -66,6 +62,7 @@ DOM migration 已完成，不重新诊断。
 * `_save()` 仍按 score 降序写入 `output/jobs_<timestamp>.json`，`_print_top10()`
   仍在每轮保存后调用。R0 未发现 save / TOP10 / output 回归。
 * `config.yaml` 当前 text model 为 `qwen3.5:9b`；本机 Ollama `/api/tags` 确认
+  模型已安装。
   模型已安装。
 * 真实最小 matcher 请求成功：单简历 Python backend 样本在 **29.52s** 返回
   score `8.05`、selected resume、五项 dimension scores 和非空 analysis。当前
@@ -227,6 +224,24 @@ R3 完成后：
 ```text
 PRODUCT_RUNNABLE_MVP = PASS
 ```
+
+---
+
+# Production Entrypoint Closure
+
+状态：COMPLETED（2026-09-16）
+
+实际结果：
+
+* `config.yaml` 的正式默认 `extraction.job_list_mode` 已切换为 `dom`。
+* 新增回归覆盖：默认配置选择 DOM；可用 DOM cards 时不调用 Vision screenshot
+  或 semantic enumeration。
+* DOM 无 usable cards 时的既有 Vision semantic fallback 保持不变。
+* 未修改 Vision screenshot、matcher、HumanActions 或 detail extraction；未重跑
+  R0/R1/DOM migration，未处理 deferred 项。
+* targeted tests：`tests/test_config.py tests/test_main.py`，`35 passed`。
+* 等待人工验收正式入口：`python main.py` → LinkedIn 搜索后 Enter → 第一页
+  进入 DOM 岗位处理，不再因默认 Vision full-page screenshot 触发 30s timeout。
 
 ---
 

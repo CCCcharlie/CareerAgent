@@ -26,4 +26,4 @@ behavior:
   delay_max: 6
 
 extraction:
-  job_list_mode: "vision"
+  job_list_mode: "dom"

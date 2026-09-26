@@ -12,10 +12,10 @@ def load_config():
         return yaml.safe_load(config_file)
 
 
-def test_config_declares_the_vision_job_list_mode_by_default():
+def test_config_declares_the_dom_job_list_mode_by_default():
     config = load_config()
 
-    assert config["extraction"]["job_list_mode"] == "vision"
+    assert config["extraction"]["job_list_mode"] == "dom"
 
 
 def test_config_job_list_mode_is_limited_to_supported_values():
